@@ -1,0 +1,42 @@
+# 가상환경
+venv/
+env/
+.venv/
+
+# Python 캐시/컴파일 파일
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 패키지 빌드 산물
+*.egg-info/
+dist/
+build/
+
+# 환경변수/비밀키 파일
+.env
+.env.local
+*.pem
+*.key
+
+# 테스트/커버리지 산물
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 타입체커/린터 캐시
+.mypy_cache/
+.ruff_cache/
+
+# IDE/에디터 설정
+.vscode/
+.idea/
+*.swp
+
+# OS가 자동 생성하는 파일
+.DS_Store
+Thumbs.db
+
+# 로그 파일
+*.log
