@@ -10,9 +10,11 @@ AI 서버 API 명세서(최종 확정본)를 그대로 코드로 옮긴 스키�
   2. 요청(Request) 스키마 - 클라이언트가 우리에게 보내는 것
   3. 응답 하위 조각(sub-schema) - 여러 응답에서 재사용되는 구성요소
   4. 응답(Response) 스키마 - 우리가 클라이언트에게 돌려주는 것
+  5. 파이프라인 내부 모델 - TourAPI 조회 결과 (응답으로 직접 나가지 않음)
 """
 
 from __future__ import annotations
+from datetime import date
 from typing import Optional, Literal
 from pydantic import BaseModel, Field
 
@@ -243,3 +245,70 @@ class ErrorResponse(BaseModel):
     """대부분의 4xx/5xx가 공통으로 쓰는 형태 (data: null)"""
     message: str
     data: None = None
+
+
+# ============================================================
+# 5. 파이프라인 내부 모델 (TourAPI 조회 결과)
+# ============================================================
+# 위 Place/EventInfo는 백엔드에 돌려주는 최종 응답 모양이고, 아래 두 모델은
+# 파이프라인 안에서 TourAPIClient → 노드 → State로 흘러가는 조회 결과입니다.
+# 일정 배치·추천 이유 같은 LLM 생성 값이 붙기 전 단계라 필드 구성이 다릅니다.
+# 여기 담긴 이름·주소·좌표·이미지는 LLM을 거치지 않고 그대로 최종 응답으로 갑니다.
+#
+# 필드 이름은 우리 쪽 이름입니다. TourAPI 응답 키를 이 필드로 옮기는 일은
+# TourAPIClient가 담당하고, 실제 응답 키는 아직 조사 중입니다 (tour_api.py TODO).
+# 필수 여부도 실물 응답을 보기 전이라, 식별자·이름(행사는 기간까지) 외에는
+# 일단 Optional로 둡니다.
+
+class TourPlace(BaseModel):
+    """TourAPI 장소 조회 결과 하나. 장소 추천 노드의 산출물."""
+
+    # TourAPI 원본 식별자. LLM이 생성한 일정·추천 이유와 사실 데이터를
+    # 병합할 때 기준 키로 쓴다 (이름은 동명 장소가 있을 수 있어 키로 부적합).
+    content_id: str
+    name: str
+
+    # TODO: 주소가 한 필드로 오는지, 기본주소/상세주소로 나뉘어 오는지 확인
+    address: Optional[str] = None
+
+    # TODO: 좌표 값의 타입(문자열/숫자)과 경도·위도 필드 구분 확인
+    coordinates: Optional[Coordinates] = None
+
+    # TODO: 이미지 없는 장소가 얼마나 되는지 확인. 응답 Place.image_url은
+    # 필수라서, 이미지 없는 장소를 필터링에서 뺄지 결정과 연결됨
+    image_url: Optional[str] = None
+
+    # TODO: TourAPI 카테고리 체계 확인 (단일 코드인지 대/중/소 계층인지,
+    # 콘텐츠 유형 구분이 따로 있는지). 확인 후 필드 모양 자체가 바뀔 수 있음.
+    # 응답 Place.category("문화" 같은 표시용 이름)로 바꾸는 규칙도 미정
+    category_code: Optional[str] = None
+
+    # 추천 이유 프롬프트의 "설명"에 들어갈 개요 텍스트.
+    # TODO: 목록 조회 응답에 개요가 포함되는지, 장소별 상세 조회를 따로 해야
+    # 하는지 확인. 따로 해야 하면 호출 수가 장소 수만큼 늘어 하루 1,000건
+    # 한도에 직접 영향
+    description: Optional[str] = None
+
+
+class TourEvent(BaseModel):
+    """TourAPI 행사 조회 결과 하나. 행사 추천 노드의 산출물."""
+
+    content_id: str
+    name: str
+
+    # 여행 기간과 겹치는지 비교하고 일정의 해당 날짜에 배치할 때 쓰므로
+    # 문자열이 아니라 date로 둔다. TourAPI 날짜 형식 → date 변환은 TourAPIClient 담당.
+    # TODO: TourAPI 날짜 형식 확인
+    start_date: date
+    end_date: date
+
+    # 응답 EventInfo.venue에 쓰임.
+    # TODO: 행사 장소명을 별도 필드로 주는지, 주소만 주는지 확인
+    venue: Optional[str] = None
+
+    # 행사를 일정 안에 장소처럼 배치하는 경우(응답 Place.event_end_date에 값이
+    # 들어가는 경우) 응답 Place의 주소·좌표·이미지가 필요해서 둔다.
+    # TODO: 행사 조회 응답에 이 값들이 포함되는지 확인
+    address: Optional[str] = None
+    coordinates: Optional[Coordinates] = None
+    image_url: Optional[str] = None
