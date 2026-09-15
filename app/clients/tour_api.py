@@ -94,7 +94,7 @@ class TourAPIClient:
                 이 값을 생략하고 재조회하는 용도로 씀.
             category_codes: TourAPI 카테고리 코드 목록.
                 TODO: 취향 대분류/중분류 → TourAPI 카테고리 코드 매핑 테이블이
-                아직 없음 (임의로 만들지 않기로 함). 사용자에게 확인 필요.
+                아직 없음. 팀에서 매핑 규칙을 정한 뒤 채움 (임의로 만들지 않음).
             page: 페이지 번호. TODO: TourAPI 페이지네이션 파라미터명 확정 필요
             num_of_rows: 페이지당 건수. TODO: 적정값(일정 채우기 충분한 후보 수
                 vs 응답 크기) 확정 필요

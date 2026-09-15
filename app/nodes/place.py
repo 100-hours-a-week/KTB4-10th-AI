@@ -45,7 +45,7 @@ async def recommend_places(state: "PipelineState") -> dict:
     TODO: 지역명 → TourAPI 지역코드 매핑 테이블 없음
     TODO: 3번 "조건으로 필터링"의 구체 기준 미정 (이미지 없는 장소 제외 여부 등)
     TODO: 6번 대체 지역 결과를 State 어느 칸에 담을지 미정
-          (문서 의사코드엔 "대체지역"이 있으나 요청하신 State 필드 목록엔 없음)
+          (팀 문서 의사코드 3-2엔 "대체지역"이 있으나 3-1 상태 정의엔 없음)
     TODO: TourAPIClient/LLMClient를 이 노드가 어떻게 받을지 미정
           (모듈 전역 인스턴스 / LangGraph config로 전달 / 팩토리 함수 중 결정 필요)
     TODO: 단계목록·현재단계 갱신을 노드 안에서 할지, 그래프 실행부에서 일괄 처리할지 미정
