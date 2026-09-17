@@ -42,6 +42,11 @@ Thumbs.db
 *.log
 
 
+# TourAPI 탐색 스크립트가 남기는 응답 샘플/호출 기록
+samples/
+
 # documents
 docs/
 CLAUDE.md
+AGENTS.md
+scripts/
