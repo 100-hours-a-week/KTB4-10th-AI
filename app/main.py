@@ -11,11 +11,12 @@ building_itinerary 단계에서 일부러 실패하도록 만들어뒀습니다.
 """
 
 from __future__ import annotations
+
 import asyncio
 
-from fastapi import FastAPI, BackgroundTasks, Request
-from fastapi.responses import JSONResponse
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from app import state
 from app.errors import (
@@ -35,53 +36,78 @@ app = FastAPI(title="AI 서버 (스켈레톤)")
 # 하고, 실제 상태 코드/메시지 변환은 전부 여기 한곳에 모아둡니다.
 # ============================================================
 
+
 @app.exception_handler(RequestValidationError)
 async def handle_validation_error(request: Request, exc: RequestValidationError):
     # FastAPI 기본 동작은 422인데, 우리 명세서는 422를 quota_exceeded
     # 전용으로 예약해뒀으므로 여기서 400으로 바꿔치기합니다.
-    return JSONResponse(status_code=400, content={"message": "missing_required_field", "data": None})
+    return JSONResponse(
+        status_code=400, content={"message": "missing_required_field", "data": None}
+    )
 
 
 @app.exception_handler(InvalidDateRange)
 async def handle_invalid_date_range(request: Request, exc: InvalidDateRange):
-    return JSONResponse(status_code=400, content={"message": "invalid_date_range", "data": None})
+    return JSONResponse(
+        status_code=400, content={"message": "invalid_date_range", "data": None}
+    )
 
 
 @app.exception_handler(InvalidPreferenceMapping)
-async def handle_invalid_preference_mapping(request: Request, exc: InvalidPreferenceMapping):
-    return JSONResponse(status_code=400, content={"message": "invalid_preference_mapping", "data": None})
+async def handle_invalid_preference_mapping(
+    request: Request, exc: InvalidPreferenceMapping
+):
+    return JSONResponse(
+        status_code=400, content={"message": "invalid_preference_mapping", "data": None}
+    )
 
 
 @app.exception_handler(state.JobNotFound)
 async def handle_job_not_found(request: Request, exc: state.JobNotFound):
-    return JSONResponse(status_code=404, content={"message": "guidebook_not_found", "data": None})
+    return JSONResponse(
+        status_code=404, content={"message": "guidebook_not_found", "data": None}
+    )
 
 
 @app.exception_handler(state.InvalidState)
 async def handle_invalid_state(request: Request, exc: state.InvalidState):
-    return JSONResponse(status_code=409, content={"message": "invalid_state", "data": None})
+    return JSONResponse(
+        status_code=409, content={"message": "invalid_state", "data": None}
+    )
 
 
 @app.exception_handler(state.RetryLimitExceeded)
 async def handle_retry_limit(request: Request, exc: state.RetryLimitExceeded):
-    return JSONResponse(status_code=409, content={"message": "retry_limit_exceeded", "data": None})
+    return JSONResponse(
+        status_code=409, content={"message": "retry_limit_exceeded", "data": None}
+    )
 
 
 @app.exception_handler(state.JobAlreadyRunning)
 async def handle_job_running(request: Request, exc: state.JobAlreadyRunning):
-    return JSONResponse(status_code=409, content={"message": "job_already_running", "data": {"job_id": exc.job_id}})
+    return JSONResponse(
+        status_code=409,
+        content={"message": "job_already_running", "data": {"job_id": exc.job_id}},
+    )
 
 
 @app.exception_handler(state.QuotaExceeded)
 async def handle_quota_exceeded(request: Request, exc: state.QuotaExceeded):
-    return JSONResponse(status_code=422, content={"message": "quota_exceeded", "data": None})
+    return JSONResponse(
+        status_code=422, content={"message": "quota_exceeded", "data": None}
+    )
 
 
 # ============================================================
 # 백그라운드 파이프라인 시뮬레이션
 # ============================================================
 
-STEP_ORDER = ["finding_places", "checking_events", "building_itinerary", "writing_reasons"]
+STEP_ORDER = [
+    "finding_places",
+    "checking_events",
+    "building_itinerary",
+    "writing_reasons",
+]
 
 
 def _build_mock_completed_payload(job: dict) -> dict:
@@ -95,23 +121,38 @@ def _build_mock_completed_payload(job: dict) -> dict:
             "duration_label": f"{conditions.get('people_count', 1)}명",
         },
         "days": [{"day": 1, "representative": "첨성대", "place_count": 1}],
-        "itinerary": [{
-            "day": 1,
-            "date": "2026-10-12",
-            "places": [{
-                "order": 1, "time": "09:00", "content_id": "126508",
-                "name": "첨성대", "category": "문화",
-                "description": "동양에서 가장 오래된 천문대",
-                "recommend_reason": "조용한 곳을 선호하셔서 이른 아침으로 배치했어요",
-                "tip": "오전 9시 이전이면 한산해요", "duration_minutes": 60,
-                "address": "경상북도 경주시 인왕동",
-                "coordinates": {"lat": 35.8347, "lng": 129.2190},
-                "image_url": "https://example.com/126508.jpg",
-                "source": "tourapi", "event_end_date": None,
-            }],
-        }],
-        "events": [{"event_id": "ev_221", "name": "신라문화제",
-                     "period": "26.10.12 - 26.10.14", "venue": "경주엑스포대공원"}],
+        "itinerary": [
+            {
+                "day": 1,
+                "date": "2026-10-12",
+                "places": [
+                    {
+                        "order": 1,
+                        "time": "09:00",
+                        "content_id": "126508",
+                        "name": "첨성대",
+                        "category": "문화",
+                        "description": "동양에서 가장 오래된 천문대",
+                        "recommend_reason": "조용한 곳을 선호하셔서 이른 아침으로 배치했어요",
+                        "tip": "오전 9시 이전이면 한산해요",
+                        "duration_minutes": 60,
+                        "address": "경상북도 경주시 인왕동",
+                        "coordinates": {"lat": 35.8347, "lng": 129.2190},
+                        "image_url": "https://example.com/126508.jpg",
+                        "source": "tourapi",
+                        "event_end_date": None,
+                    }
+                ],
+            }
+        ],
+        "events": [
+            {
+                "event_id": "ev_221",
+                "name": "신라문화제",
+                "period": "26.10.12 - 26.10.14",
+                "venue": "경주엑스포대공원",
+            }
+        ],
         "conditions": conditions,
     }
 
@@ -133,12 +174,13 @@ async def simulate_pipeline(job_id: str, should_fail: bool) -> None:
 # 라우터
 # ============================================================
 
+
 @app.get("/health")
 def health():
     return {"message": "health_ok", "data": None}
 
 
-@app.post("/guidebooks", status_code=202)
+@app.post("/guidebooks-generations", status_code=202)
 async def create_guidebook(req: GenerateRequest, background_tasks: BackgroundTasks):
     validate_date_range(req.start_date, req.end_date)
     validate_preference_mapping(req.preferences)
@@ -149,11 +191,15 @@ async def create_guidebook(req: GenerateRequest, background_tasks: BackgroundTas
 
     return {
         "message": "guidebook_accepted",
-        "data": {"job_id": job["job_id"], "status": "pending", "remaining_quota": state.get_remaining_quota()},
+        "data": {
+            "job_id": job["job_id"],
+            "status": "pending",
+            "remaining_quota": state.get_remaining_quota(),
+        },
     }
 
 
-@app.get("/guidebooks/{job_id}")
+@app.get("/guidebooks-generations/{job_id}")
 def get_guidebook_status(job_id: str):
     job = state.get_job(job_id)  # 없으면 JobNotFound -> 404 핸들러가 처리
 
@@ -165,37 +211,58 @@ def get_guidebook_status(job_id: str):
         return {
             "message": "guidebook_failed",
             "data": {
-                "job_id": job["job_id"], "status": "failed",
-                "steps": job["steps"], "error": job["error"], "retry_count": job["retry_count"],
+                "job_id": job["job_id"],
+                "status": "failed",
+                "steps": job["steps"],
+                "error": job["error"],
+                "retry_count": job["retry_count"],
             },
         }
 
     # pending 또는 processing
     return {
         "message": "guidebook_processing",
-        "data": {"job_id": job["job_id"], "status": "processing", "progress": {"steps": job["steps"]}},
+        "data": {
+            "job_id": job["job_id"],
+            "status": "processing",
+            "progress": {"steps": job["steps"]},
+        },
     }
 
 
-@app.post("/guidebooks/{job_id}/retry", status_code=202)
+@app.post("/guidebooks-generations/{job_id}/retry", status_code=202)
 async def retry_guidebook(job_id: str, background_tasks: BackgroundTasks):
     job = state.retry_job(job_id)  # 404/409/409 -> 각 핸들러가 처리
     conditions = job["conditions"]
     should_fail = "실패" in conditions.get("region", {}).get("city", "")
     background_tasks.add_task(simulate_pipeline, job_id, should_fail)
 
-    return {"message": "retry_accepted", "data": {"job_id": job["job_id"], "status": "pending", "retry_count": job["retry_count"]}}
+    return {
+        "message": "retry_accepted",
+        "data": {
+            "job_id": job["job_id"],
+            "status": "pending",
+            "retry_count": job["retry_count"],
+        },
+    }
 
 
-@app.post("/guidebooks/{guidebook_id}/regenerate", status_code=202)
-async def regenerate_guidebook(guidebook_id: str, req: RegenerateRequest, background_tasks: BackgroundTasks):
-    job = state.regenerate_guidebook(guidebook_id, req.feedback, req.title)  # 404 -> 핸들러 처리
+@app.post("/guidebooks-generations/{guidebook_id}/regenerate", status_code=202)
+async def regenerate_guidebook(
+    guidebook_id: str, req: RegenerateRequest, background_tasks: BackgroundTasks
+):
+    job = state.regenerate_guidebook(
+        guidebook_id, req.feedback, req.title
+    )  # 404 -> 핸들러 처리
     background_tasks.add_task(simulate_pipeline, job["job_id"], False)
 
-    return {"message": "regenerate_accepted", "data": {"job_id": job["job_id"], "status": "pending"}}
+    return {
+        "message": "regenerate_accepted",
+        "data": {"job_id": job["job_id"], "status": "pending"},
+    }
 
 
-@app.post("/guidebooks/regions-recommendations")
+@app.post("/guidebooks-generations/regions-recommendations")
 def recommend_regions(req: RegionRecommendRequest):
     validate_preference_mapping(req.preferences)
 
@@ -204,12 +271,24 @@ def recommend_regions(req: RegionRecommendRequest):
         "message": "region_recommended",
         "data": {
             "regions": [
-                {"name": "경주", "province": "경상북도", "city": "경주시",
-                 "recommend_reason": f"{picked} 취향에 잘 맞는 역사·문화 도시예요."},
-                {"name": "안동", "province": "경상북도", "city": "안동시",
-                 "recommend_reason": "전통 마을이 잘 보존되어 있어요."},
-                {"name": "강진", "province": "전라남도", "city": "강진군",
-                 "recommend_reason": "유적과 바다가 가까이 있어요."},
+                {
+                    "name": "경주",
+                    "province": "경상북도",
+                    "city": "경주시",
+                    "recommend_reason": f"{picked} 취향에 잘 맞는 역사·문화 도시예요.",
+                },
+                {
+                    "name": "안동",
+                    "province": "경상북도",
+                    "city": "안동시",
+                    "recommend_reason": "전통 마을이 잘 보존되어 있어요.",
+                },
+                {
+                    "name": "강진",
+                    "province": "전라남도",
+                    "city": "강진군",
+                    "recommend_reason": "유적과 바다가 가까이 있어요.",
+                },
             ]
         },
     }

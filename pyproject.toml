@@ -6,6 +6,33 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.141.1",
+    "langgraph>=1.2.11",
     "pydantic>2",
     "uvicorn>=0.53.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.8",
+]
+
+# 팀 공통 CI 기준과 맞춘다 (docs/setting/Ruff 설정.md).
+# 로컬과 CI가 같은 결과를 내려면 버전(uv.lock)과 규칙(여기) 둘 다 고정돼야 한다 —
+# Ruff는 버전마다 기본 규칙이 다르다.
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+# 포맷터는 위의 line-length(88)로 코드를 쪼갠다. 하지만 주석·문자열 안쪽은
+# 뜻이 바뀌므로 쪼개지 못해, 한글 주석이 88을 넘으면 사람이 손으로 고치는 수밖에 없다.
+# 한글은 화면에서 두 칸을 먹는데 Ruff는 한 글자로 세서 특히 자주 걸린다.
+# E501만 100까지 봐준다 — 정말 긴 줄을 잡는 가드는 남는다.
+[tool.ruff.lint.pycodestyle]
+max-line-length = 100
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
