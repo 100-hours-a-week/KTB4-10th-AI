@@ -14,10 +14,11 @@ AI 서버 API 명세서(최종 확정본)를 그대로 코드로 옮긴 스키�
 """
 
 from __future__ import annotations
-from datetime import date
-from typing import Optional, Literal
-from pydantic import BaseModel, Field
 
+from datetime import date
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field
 
 # ============================================================
 # 1. 공통 Enum
@@ -37,8 +38,10 @@ ErrorType = Literal["server_error", "network_disconnected", "timeout"]
 # 2. 요청(Request) 스키마
 # ============================================================
 
+
 class RegionInput(BaseModel):
-    """POST /guidebooks 의 region 필드"""
+    """POST /guidebooks-generations 의 region 필드"""
+
     province: str
     city: str
 
@@ -55,13 +58,15 @@ class Preferences(BaseModel):
     단순해집니다. (예: large_category의 모든 항목이 mid_category의
     key로 존재하고, 그 값(배열)이 비어있지 않은지만 확인하면 됨)
     """
+
     large_category: list[str] = Field(..., min_length=1)
     mid_category: dict[str, list[str]]
     travel_style: Optional[list[str]] = None
 
 
 class GenerateRequest(BaseModel):
-    """POST /guidebooks 요청 바디"""
+    """POST /guidebooks-generations 요청 바디"""
+
     region: RegionInput
     start_date: str  # YYYY-MM-DD, 최대 7일 이내 / 과거 날짜 불가 (검증은 라우터 단에서)
     end_date: str
@@ -72,30 +77,33 @@ class GenerateRequest(BaseModel):
 
 class RegenerateRequest(BaseModel):
     """
-    POST /guidebooks/{guidebook_id}/regenerate 요청 바디
+    POST /guidebooks-generations/{guidebook_id}/regenerate 요청 바디
 
     feedback이 필수, title은 선택인 이유: 명세서 E열에 "feedback: 필수,
     title: 선택"으로 명시되어 있습니다. 사용자가 내용 피드백 없이
     제목만 바꾸는 경우는 이 엔드포인트의 주된 용도(자연어 피드백 기반
     재생성)와 어긋나므로, feedback을 항상 받도록 강제합니다.
     """
+
     feedback: str = Field(..., max_length=200)
     title: Optional[str] = Field(default=None, max_length=15)
 
 
 class RegionRecommendRequest(BaseModel):
-    """POST /guidebooks/regions-recommendations 요청 바디"""
+    """POST /guidebooks-generations/regions-recommendations 요청 바디"""
+
     preferences: Preferences
     duration_days: int
 
 
-# retry 엔드포인트(POST /guidebooks/{job_id}/retry)는 body가 없습니다.
+# retry 엔드포인트(POST /guidebooks-generations/{job_id}/retry)는 body가 없습니다.
 # 식별자(job_id)가 이미 URL 경로에 있어서, 별도 요청 스키마가 필요 없습니다.
 
 
 # ============================================================
 # 3. 응답 하위 조각 (여러 응답에서 재사용)
 # ============================================================
+
 
 class Coordinates(BaseModel):
     lat: float
@@ -108,6 +116,7 @@ class Step(BaseModel):
     전부 이 steps 배열에서 계산 가능해 제거했습니다
     (state가 'running'인 항목 = 현재 단계, 'failed'인 항목 = 실패 단계).
     """
+
     key: str
     label: str
     state: StepState
@@ -117,19 +126,21 @@ class ErrorInfo(BaseModel):
     """실패 시 error 필드. status 코드가 아니라 응답 바디 안에 담기는
     이유는, 'GET 요청 자체'는 성공(200)했고 다만 '조회해보니 그 작업이
     실패해 있었다'는, 서로 다른 층위의 정보이기 때문입니다."""
+
     type: ErrorType
     message: str
 
 
 class Place(BaseModel):
     """itinerary 안의 장소 하나"""
+
     order: int
     time: str
-    content_id: str          # TourAPI 원본 데이터 추적용
+    content_id: str  # TourAPI 원본 데이터 추적용
     name: str
     category: str
     description: str
-    recommend_reason: str    # region 추천/장소 추천 전체에서 이름 통일됨
+    recommend_reason: str  # region 추천/장소 추천 전체에서 이름 통일됨
     tip: str
     duration_minutes: int
     address: str
@@ -147,6 +158,7 @@ class ItineraryDay(BaseModel):
 
 class DaySummary(BaseModel):
     """GUIDE-05 목록 카드용 요약 ("Day 1 첨성대 외 3곳")"""
+
     day: int
     representative: str
     place_count: int
@@ -182,6 +194,7 @@ class Progress(BaseModel):
 # 명세서의 모든 응답이 { "message": str, "data": ... } 형태를 공통으로
 # 씁니다. data의 내용물만 상황별로 다르므로, 각 상황별 data 모델을
 # 따로 정의하고 message는 각 라우터에서 리터럴 값으로 고정합니다.
+
 
 class GenerateAcceptedData(BaseModel):
     job_id: str
@@ -236,13 +249,16 @@ class HealthData(BaseModel):
 
 # ---- 에러 응답 (data는 항상 null 또는 최소 정보) ----
 
+
 class JobConflictData(BaseModel):
     """409 job_already_running 전용 - 이미 실행 중인 job_id를 알려줌"""
+
     job_id: str
 
 
 class ErrorResponse(BaseModel):
     """대부분의 4xx/5xx가 공통으로 쓰는 형태 (data: null)"""
+
     message: str
     data: None = None
 
@@ -259,6 +275,7 @@ class ErrorResponse(BaseModel):
 # TourAPIClient가 담당하고, 실제 응답 키는 아직 조사 중입니다 (tour_api.py TODO).
 # 필수 여부도 실물 응답을 보기 전이라, 식별자·이름(행사는 기간까지) 외에는
 # 일단 Optional로 둡니다.
+
 
 class TourPlace(BaseModel):
     """TourAPI 장소 조회 결과 하나. 장소 추천 노드의 산출물."""

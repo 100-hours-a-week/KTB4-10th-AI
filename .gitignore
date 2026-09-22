@@ -54,10 +54,9 @@ docs/
 CLAUDE.md
 AGENTS.md
 
-# 스크립트는 로컬 전용. 장소 조회 기본 버전만 올린다
-# (폴더째 무시하면 안의 파일을 예외로 뺄 수 없어서 scripts/* 로 쓴다)
-scripts/*
-!scripts/simple_search.py
+.agents/
+.claude/
 
 #
 scripts/
+v0/

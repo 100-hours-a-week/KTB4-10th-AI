@@ -3,7 +3,7 @@ app/state.py
 
 'DB'가 아니라 요청 사이에 값을 잠깐 기억해두는 파이썬 딕셔너리입니다.
 서버를 재시작하면 전부 사라지고, 스키마도 영속성도 없습니다.
-목적은 단 하나: POST /guidebooks가 발급한 job_id가 GET /guidebooks/{job_id}
+목적은 단 하나: POST /guidebooks-generations가 발급한 job_id가 GET /guidebooks-generations/{job_id}
 에서 정말로 통하는지, retry/regenerate가 실제로 상태를 갈아끼우는지를
 검증하는 것입니다.
 
@@ -12,9 +12,9 @@ jobs / guidebooks 두 딕셔너리로 대응시켰습니다.
 """
 
 from __future__ import annotations
+
 import uuid
 from typing import Any
-
 
 # ============================================================
 # 예외 클래스
@@ -22,6 +22,7 @@ from typing import Any
 # 라우터(다음 단계)에서 이 예외를 잡아 그대로 상태 코드/메시지로
 # 변환하기만 하면 되도록, 이름을 에러 코드 표준화 문서의 코드와
 # 맞춰뒀습니다.
+
 
 class JobNotFound(Exception):
     """404 guidebook_not_found"""
@@ -37,6 +38,7 @@ class RetryLimitExceeded(Exception):
 
 class JobAlreadyRunning(Exception):
     """409 job_already_running"""
+
     def __init__(self, job_id: str):
         self.job_id = job_id
 
@@ -95,7 +97,7 @@ DEFAULT_STEPS = [
 
 def create_job(conditions: dict) -> dict:
     """
-    POST /guidebooks 처리.
+    POST /guidebooks-generations 처리.
     - quota 차감
     - 동일 조건으로 이미 실행 중인 작업이 있으면 JobAlreadyRunning
     - 새 job_id 발급, pending 상태로 기록
@@ -103,8 +105,10 @@ def create_job(conditions: dict) -> dict:
     signature = str(sorted(conditions.items()))
     if signature in _in_flight_signatures:
         existing = next(
-            j["job_id"] for j in jobs.values()
-            if j.get("_signature") == signature and j["status"] in ("pending", "processing")
+            j["job_id"]
+            for j in jobs.values()
+            if j.get("_signature") == signature
+            and j["status"] in ("pending", "processing")
         )
         raise JobAlreadyRunning(existing)
 
@@ -165,7 +169,11 @@ def complete_job(job_id: str, guidebook_payload: dict) -> dict:
     """
     job = get_job(job_id)
     guidebook_id = f"gb_{uuid.uuid4().hex[:8]}"
-    guidebooks[guidebook_id] = {**guidebook_payload, "guidebook_id": guidebook_id, "job_id": job_id}
+    guidebooks[guidebook_id] = {
+        **guidebook_payload,
+        "guidebook_id": guidebook_id,
+        "job_id": job_id,
+    }
     job["status"] = "completed"
     job["guidebook_id"] = guidebook_id
     _in_flight_signatures.discard(job.get("_signature"))
@@ -174,7 +182,7 @@ def complete_job(job_id: str, guidebook_payload: dict) -> dict:
 
 def retry_job(job_id: str) -> dict:
     """
-    POST /guidebooks/{job_id}/retry 처리.
+    POST /guidebooks-generations/{job_id}/retry 처리.
     - failed 상태가 아니면 InvalidState
     - retry_count가 이미 3이면 RetryLimitExceeded
     - quota는 차감하지 않음 (명세서 규칙)
@@ -194,7 +202,7 @@ def retry_job(job_id: str) -> dict:
 
 def regenerate_guidebook(guidebook_id: str, feedback: str, title: str | None) -> dict:
     """
-    POST /guidebooks/{guidebook_id}/regenerate 처리.
+    POST /guidebooks-generations/{guidebook_id}/regenerate 처리.
     completed 상태(=guidebooks에 존재)가 아니면 InvalidState.
     quota 차감함 (retry와 달리 명세서상 차감 대상).
     """
@@ -207,7 +215,11 @@ def regenerate_guidebook(guidebook_id: str, feedback: str, title: str | None) ->
         "status": "pending",
         "retry_count": 0,
         "steps": [dict(s) for s in DEFAULT_STEPS],
-        "conditions": {**gb.get("conditions", {}), "feedback": feedback, "title": title},
+        "conditions": {
+            **gb.get("conditions", {}),
+            "feedback": feedback,
+            "title": title,
+        },
         "guidebook_id": None,
         "error": None,
         "_signature": None,
