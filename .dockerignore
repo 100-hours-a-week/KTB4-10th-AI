@@ -1,0 +1,22 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Python
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+
+# 환경변수 / Secret
+.env
+.env.*
+
+# CI / 문서
+.github
+README.md
