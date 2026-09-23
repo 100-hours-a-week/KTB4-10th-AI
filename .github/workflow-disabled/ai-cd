@@ -11,7 +11,7 @@ permissions:
 
 env:
   AWS_REGION: ap-northeast-2
-  IMAGE_NAME: ghcr.io/kgb/ai
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ktb4-10-ai
 
 jobs:
   ai-cd:
@@ -76,12 +76,18 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.image.outputs.tag }}
           INSTANCE_ID: ${{ secrets.INSTANCE_ID }}
+
+          # Private GHCR Pull
+          GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+
         run: |
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
             --parameters "commands=[
               \"cd /home/ubuntu/kgb-ai\",
+              \"echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin\",
               \"docker pull ${IMAGE_NAME}:${IMAGE_TAG}\",
               \"docker rm -f kgb-ai || true\",
               \"docker run -d --name kgb-ai --restart unless-stopped -p 8000:8000 --env-file .env ${IMAGE_NAME}:${IMAGE_TAG}\",
