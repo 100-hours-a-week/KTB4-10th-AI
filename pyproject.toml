@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "anthropic>=1.7.0",
     "fastapi>=0.141.1",
     "langgraph>=1.2.11",
     "pydantic>2",
@@ -13,6 +14,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    # fastapi 의 TestClient 가 쓴다. anthropic 이 끌어온 것에 얹히지 않도록 우리 것으로 적는다.
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
     "ruff>=0.16.8",
 ]
 
