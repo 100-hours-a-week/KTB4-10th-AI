@@ -1,0 +1,36 @@
+name: KGB AI CI
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+
+jobs:
+  ai-ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Ruff Lint
+        run: uv run ruff check . --output-format=github
+
+      - name: Ruff Format Check
+        run: uv run ruff format --check .
+
+      - name: Docker Image Build
+        if: github.base_ref == 'main'
+        run: docker build -t ai:ci .

@@ -42,6 +42,25 @@ Thumbs.db
 *.log
 
 
+# TourAPI 탐색 스크립트가 남기는 응답 샘플/호출 기록
+samples/
+fixtures/
+
+# 로컬에서만 쓰는 분류 코드표 원본
+# data/*.csv
+
 # documents
 docs/
 CLAUDE.md
+AGENTS.md
+
+.agents/
+.claude/
+
+#
+scripts/
+_out
+
+imsi/
+tests/
+tools/
