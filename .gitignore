@@ -64,3 +64,5 @@ _out
 imsi/
 tests/
 tools/
+
+.env.cloud.example

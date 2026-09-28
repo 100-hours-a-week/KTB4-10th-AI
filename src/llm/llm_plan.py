@@ -12,7 +12,7 @@ src/llm/llm_plan.py
 2026-09-28 에 부품 파일(py)을 합쳤다. Gemini 호출을 지우자 Claude 호출 부품만 남아
 따로 둘 이유가 없어졌다.
 
-**plan_all 은 항상 Claude 를 부른다.** 모델은 V0_LLM_MODEL (비우면 claude-sonnet-5).
+**plan_all 은 항상 Claude 를 부른다.** 모델은 LLM_MODEL (비우면 claude-sonnet-5).
 가짜는 테스트·로컬 도구용이라 tools/fake_llm.py 에 있고, 쓰는 쪽이 이 자리에 끼운다.
 
 실패하면 **멈춘다** — 대충 채운 일정을 내보내지 않는다. 조용히 품질이 낮아지면 왜 그런지 알 수 없다.
@@ -44,7 +44,7 @@ CLAUDE_TIMEOUT = 240
 CLAUDE_MAX_RETRIES = 1
 
 ENV_PATH = REPO_ROOT / ".env"
-MODEL_VAR = "V0_LLM_MODEL"
+MODEL_VAR = "LLM_MODEL"
 ANTHROPIC_KEY_VAR = "ANTHROPIC_API_KEY"
 
 
