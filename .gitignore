@@ -47,7 +47,7 @@ samples/
 fixtures/
 
 # 로컬에서만 쓰는 분류 코드표 원본
-app/data/*.csv
+# data/*.csv
 
 # documents
 docs/
@@ -59,4 +59,8 @@ AGENTS.md
 
 #
 scripts/
-v0/
+_out
+
+imsi/
+tests/
+tools/
