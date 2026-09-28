@@ -6,7 +6,7 @@ src/llm/llm_plan.py
 
 2026-09-27 까지는 코드가 날짜를 묶고 모델은 하루 안의 순서만 정하는 경로(llm.plan_days)와
 나란히 있었다. 그 경로를 지우면서 같은 자리 합치기·붙이기도 함께 버렸다 — 이 경로에는
-처음부터 없던 기능이다 (docs/claude/plan/llm-plan-only.md).
+처음부터 없던 기능이다 (docs/archive/claude-260928/plan/llm-plan-only.md).
 
 모델을 부르는 일은 전부 이 파일에 있다 — 설정·키 읽기·SDK 호출·프롬프트·페이로드·검사.
 2026-09-28 에 부품 파일(py)을 합쳤다. Gemini 호출을 지우자 Claude 호출 부품만 남아
@@ -323,16 +323,21 @@ def _claude_plan_all(model: str, payload: str, trip: TripRequest) -> DayPlanDraf
 
 def load_api_key(key_var: str) -> str:
     """
-    .env 에서만 읽는다. 환경변수는 보지 않는다.
+    환경변수가 우선이고, 없으면 저장소 뿌리의 .env 파일을 직접 읽는다.
 
-    키를 두는 곳을 하나로 정해 두려는 것이다 — 셸에 남은 다른 키가 조용히 쓰이면
-    어느 키로 과금됐는지 알 수 없다. 배포 서버에도 .env 를 둔다.
+    환경변수를 먼저 보는 이유: 배포는 도커라 컨테이너 안에 .env 파일이 없다
+    (.dockerignore 가 뺀다). 호스트의 .env 는 `docker run --env-file` 로 **환경변수가
+    되어** 들어온다. 2026-09-28 에 .env 파일만 읽게 바꿨다가 배포에서 서버가 안 켜졌다.
 
     python-dotenv 를 쓰지 않는 이유는 의존성이 하나 더 늘어서다. 형식이 단순해 직접 읽는
     편이 낫다.
     """
+    from_env = os.environ.get(key_var, "").strip()
+    if from_env:
+        return from_env
+
     if not ENV_PATH.exists():
-        raise LLMError(f"{ENV_PATH} 가 없습니다. {key_var} 를 설정하세요.")
+        raise LLMError(f"환경변수 {key_var} 도 {ENV_PATH} 도 없습니다.")
 
     for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
         line = line.strip()
