@@ -49,4 +49,5 @@ data/            지역·분류·취향 코드표
 
 `main` 에 push 하면 GitHub Actions(`ai-cd.yml`)가 도커 이미지를 만들어 EC2 에 띄웁니다.
 EC2 의 `.env` 는 `docker run --env-file` 로 **환경변수가 되어** 컨테이너에 들어갑니다.
-서버용 `.env` 는 `.env.cloud.example` 을 복사해 채웁니다 (형식 주의사항이 그 안에 있습니다).
+서버용 `.env` 에는 `ANTHROPIC_API_KEY`(필수) · `SAVE_LLM_CALLS=0`(권장) · `LLM_MODEL`(선택)을 둡니다.
+`--env-file` 은 파일을 그대로 읽으므로 **따옴표·`export`·줄 끝 주석 없이** `KEY=값` 으로 씁니다 — 따옴표를 붙이면 따옴표까지 값이 됩니다.
