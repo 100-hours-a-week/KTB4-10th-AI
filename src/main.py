@@ -10,34 +10,82 @@ src/main.py
 띄우기:
     uv run uvicorn src.main:app --reload
 
-서버는 **항상 실제 모델을 부른다** (요청 1건마다 과금). 가짜는 src 에 없다 — tools/fake_llm.py.
+서버는 **기본으로 실제 모델을 부른다** (요청 1건마다 과금). LLM_MODE=fake 일 때만 가짜로 돈다 —
+클라우드팀 부하 테스트용. 켜져 있으면 시작 로그 · /health · /metrics 에 드러나게 했다.
+
+/metrics 는 Prometheus 가 긁어 간다. 숫자 정의는 src/metrics.py, 로그 형식은 src/logs.py.
 """
 
 from __future__ import annotations
 
 import asyncio
-import sys
+import time
 import traceback
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from src.llm import llm_plan
+from src import logs, metrics
+from src.llm import fake_llm, llm_plan
 from src.server import adapter, jobs
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 서버는 항상 실제 모델을 부른다. 키가 없으면 첫 요청에서야 실패하므로 켜기 전에 막는다
-    llm_plan.load_api_key(llm_plan.ANTHROPIC_KEY_VAR)
+    # 설정이 틀렸으면 첫 요청에서야 실패한다. 켜기 전에 막는다
+    mode = llm_plan.llm_mode()
+    if mode == "fake":
+        # 운영 서버에서 부하 테스트를 한다. 가짜로 켜진 걸 모르고 지나가면 안 된다
+        logs.write(
+            "WARNING",
+            "fake_llm_mode",
+            message=(
+                "가짜 LLM 모드 — 실제 모델을 부르지 않는다. "
+                "테스트 뒤 LLM_MODE 를 지우고 재기동할 것"
+            ),
+            delay_sec=fake_llm.delay_seconds(),
+        )
+    else:
+        llm_plan.load_api_key(llm_plan.ANTHROPIC_KEY_VAR)
+    metrics.LLM_MODE.labels(llm_mode=mode).set(1)
+    logs.write("INFO", "server_start", llm_mode=mode)
+
     workers = jobs.start()
     yield
     await jobs.stop(workers)
 
 
 app = FastAPI(title="가이드북 생성 서버", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _count_requests(request: Request, call_next):
+    """
+    HTTP 요청 수 · 시간 · 응답 코드를 센다.
+
+    path 는 실제 주소가 아니라 **경로 틀**(/guidebooks-generations/{job_id})로 적는다.
+    job_id 마다 따로 세면 숫자 종류가 요청 수만큼 늘어 Prometheus 가 감당하지 못한다.
+    /metrics 자체는 세지 않는다 — Prometheus 가 몇 초마다 긁어 가서 숫자가 그것으로 덮인다.
+    """
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+        status = response.status_code
+    except Exception:
+        # 예상 못 한 오류는 이 바깥(_unexpected_error)에서 500 으로 바뀐다. 여기선 500 으로 센다
+        status = 500
+        raise
+    finally:
+        route = request.scope.get("route")
+        path = route.path if route is not None else "unmatched"
+        if path != "/metrics":
+            elapsed = time.monotonic() - started
+            metrics.HTTP_REQUESTS.labels(request.method, path, str(status)).inc()
+            metrics.HTTP_DURATION.labels(request.method, path).observe(elapsed)
+    return response
 
 
 def _envelope(message: str, data: dict | None = None) -> dict:
@@ -68,20 +116,40 @@ def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     FastAPI 기본값은 {"detail": ...} 라 백엔드가 message 를 못 읽는다. 원인은 계약
     응답에 담지 않고 서버 로그에 남긴다 — 내부 사정이 바깥으로 새지 않게.
     """
-    traceback.print_exception(exc, file=sys.stderr)
+    logs.write(
+        "ERROR",
+        "application_exception",
+        path=request.url.path,
+        error=str(exc),
+        traceback="".join(traceback.format_exception(exc)),
+    )
     return JSONResponse(status_code=500, content=_envelope("internal_server_error"))
 
 
 @app.get("/health")
 def health() -> dict:
-    """계약에 없는 우리 것. 큐가 밀리는지 보려고 둔다."""
-    running = sum(1 for job in jobs.jobs.values() if job["status"] == "processing")
+    """
+    계약에 없는 우리 것. 큐가 밀리는지, 가짜 모드로 켜져 있지 않은지 보려고 둔다.
+    부하 테스트가 끝나면 llm_mode 가 real 인지 여기서 확인한다.
+    """
     return {
         "status": "ok",
+        "llm_mode": llm_plan.llm_mode(),
         "jobs": len(jobs.jobs),
         "queue_size": jobs.job_queue.qsize(),
-        "running": running,
+        "running": jobs.running_count(),
     }
+
+
+@app.get("/metrics")
+def metrics_endpoint() -> Response:
+    """
+    Prometheus 형식의 숫자. 인프라의 Prometheus 가 긁어 간다 (외부 접근은 인프라가 막는다).
+
+    make_asgi_app() 을 붙이지 않는 이유: 하위 앱으로 달면 /metrics 가 /metrics/ 로
+    넘겨지는(307) 한 단계가 끼어서, 긁는 쪽 설정에 따라 실패한다.
+    """
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/guidebooks-generations", status_code=202)
@@ -112,12 +180,21 @@ def create_generation(payload: dict) -> dict:
         places, events = adapter.to_candidates(payload.get("contents"))
     except adapter.InputError as exc:
         # 계약 응답에는 code 만 나가므로 이유는 서버 로그에 남긴다
-        print(f"[접수 거절] {exc.code} · {exc.reason}", file=sys.stderr)
+        logs.write(
+            "WARNING",
+            "request_rejected",
+            request_id=request_id,
+            code=exc.code,
+            reason=exc.reason,
+        )
         raise HTTPException(400, detail=exc.code) from exc
 
     try:
         job = jobs.accept(trip, places, events, request_id, mark)
     except asyncio.QueueFull:
+        # 부하 테스트에서 가장 먼저 볼 숫자다 (클라우드팀 요청: 거절 건수)
+        metrics.JOBS_TOTAL.labels(result="rejected").inc()
+        logs.write("WARNING", "queue_full", request_id=request_id)
         raise HTTPException(
             503, detail="service_unavailable", headers={"Retry-After": "60"}
         ) from None

@@ -16,4 +16,6 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["/app/.venv/bin/uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 요청마다 찍히는 uvicorn 평문 줄은 끈다. 로그는 JSON 한 줄로 모으고(CloudWatch),
+# 요청 수·응답 코드는 /metrics 로 본다
+CMD ["/app/.venv/bin/uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
