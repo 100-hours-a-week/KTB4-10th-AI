@@ -12,8 +12,9 @@ src/llm/llm_plan.py
 2026-09-28 에 부품 파일(py)을 합쳤다. Gemini 호출을 지우자 Claude 호출 부품만 남아
 따로 둘 이유가 없어졌다.
 
-**plan_all 은 항상 Claude 를 부른다.** 모델은 LLM_MODEL (비우면 claude-sonnet-5).
-가짜는 테스트·로컬 도구용이라 tools/fake_llm.py 에 있고, 쓰는 쪽이 이 자리에 끼운다.
+**plan_all 은 기본으로 Claude 를 부른다.** 모델은 LLM_MODEL (비우면 claude-sonnet-5).
+LLM_MODE=fake 일 때만 Claude 를 부르는 자리를 가짜(src/llm/fake_llm.py)가 대신한다 —
+클라우드팀 부하 테스트용 (2026-09-29). 검사·후처리는 두 모드가 똑같이 돈다.
 
 실패하면 **멈춘다** — 대충 채운 일정을 내보내지 않는다. 조용히 품질이 낮아지면 왜 그런지 알 수 없다.
 
@@ -29,8 +30,8 @@ import os
 import time
 from datetime import date, timedelta
 
-from src import dates
-from src.llm import calllog
+from src import dates, logs, metrics
+from src.llm import calllog, fake_llm
 from src.models import Candidate, DayDraft, DayPlanDraft, PlanDraftItem, TripRequest
 from src.paths import REPO_ROOT
 
@@ -47,9 +48,41 @@ ENV_PATH = REPO_ROOT / ".env"
 MODEL_VAR = "LLM_MODEL"
 ANTHROPIC_KEY_VAR = "ANTHROPIC_API_KEY"
 
+# real (비워 둬도 real) · fake. 인프라에 알려 준 이름이라 바꾸면 클라우드팀에도 알린다
+MODE_VAR = "LLM_MODE"
+MODES = ("real", "fake")
+
 
 class LLMError(RuntimeError):
-    """LLM 호출이나 응답 검증이 실패했다. 작업은 generation_failed 로 끝난다."""
+    """
+    LLM 호출이나 응답 검증이 실패했다. 작업은 generation_failed 로 끝난다.
+
+    kind 는 로그와 /metrics 에서 원인을 가르는 이름이다. 계약 응답의 코드와는 무관하다.
+        call       — 호출 실패 (한도 · 네트워크 · API 오류 · 거부)
+        timeout    — 호출이 CLAUDE_TIMEOUT 을 넘었다
+        parse      — 응답이 DayPlanDraft 모양이 아니다
+        validation — 모양은 맞는데 규칙을 어겼다 (_validate_all · _validate_days)
+        fake       — 가짜 모드에서 가짜가 실패했다
+    """
+
+    def __init__(self, message: str, kind: str = "call"):
+        super().__init__(message)
+        self.kind = kind
+
+
+def llm_mode() -> str:
+    """
+    LLM_MODE 를 읽는다. 비우면 real.
+
+    모르는 값이면 멈춘다. 오타("fak")를 real 로 읽으면 부하 테스트가 조용히 과금되고,
+    fake 로 읽으면 운영이 조용히 가짜 일정을 낸다. 서버가 켜질 때 한 번 불러 미리 막는다.
+    """
+    raw = os.environ.get(MODE_VAR, "").strip().lower()
+    if not raw:
+        return "real"
+    if raw not in MODES:
+        raise LLMError(f"{MODE_VAR} 는 real 또는 fake 여야 합니다: {raw!r}")
+    return raw
 
 
 # 하루에 둘 수 있는 행사 수. 프롬프트·페이로드·검사 세 군데가 같은 값을 봐야 한다.
@@ -113,12 +146,30 @@ def plan_all(
     모델에게 보내지 않는 **기록용**이다. 라벨로 바꾸는 일은 부르는 쪽(nodes.plan)이 한다 —
     코드표는 engine 에 있고, 여기서 engine 을 부르면 engine ↔ llm 폴더 순환이 된다.
     """
-    payload = _candidates_to_payload(candidates, start, day_count, per_day, conditions)
-    model = os.environ.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
-    draft = _claude_plan_all(model, payload, trip)
+    mode = llm_mode()
+    started = time.monotonic()
+    try:
+        if mode == "fake":
+            draft = _fake_plan_all(candidates, start, day_count, per_day, conditions)
+        else:
+            payload = _candidates_to_payload(
+                candidates, start, day_count, per_day, conditions
+            )
+            model = os.environ.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
+            draft = _claude_plan_all(model, payload, trip)
+    finally:
+        # 실패한 호출도 잰다. 시간 초과로 끝난 호출이 가장 알고 싶은 값이다
+        elapsed = time.monotonic() - started
+        metrics.LLM_CALL_DURATION.labels(llm_mode=mode).observe(elapsed)
 
-    _validate_all(draft.items, candidates, start, day_count, per_day)
-    _validate_days(draft.days, day_count)
+    # 검사부터가 후처리다 (클라우드팀 합의: 응답 검사 · 응답 조립 · HTML 생성)
+    metrics.mark_llm_done()
+
+    try:
+        _validate_all(draft.items, candidates, start, day_count, per_day)
+        _validate_days(draft.days, day_count)
+    except LLMError as exc:
+        raise LLMError(str(exc), kind="validation") from exc
     return draft
 
 
@@ -273,6 +324,42 @@ def _validate_days(days: list[DayDraft], day_count: int) -> None:
         )
 
 
+def _fake_plan_all(
+    candidates: list[Candidate],
+    start: date,
+    day_count: int,
+    per_day: int,
+    conditions: dict,
+) -> DayPlanDraft:
+    """
+    가짜 모드의 호출 한 건. 비용 기록 파일(calllog)에는 남기지 않는다 — 비용 장부가
+    가짜로 오염된다. 로그 한 줄은 진짜와 같은 이름(llm_call)으로 남긴다.
+    """
+    started = time.monotonic()
+    try:
+        draft = fake_llm.answer(
+            candidates,
+            start=start,
+            day_count=day_count,
+            per_day=per_day,
+            conditions=conditions,
+        )
+    except Exception as exc:
+        elapsed = round(time.monotonic() - started, 1)
+        logs.write(
+            "ERROR",
+            "llm_call_failed",
+            llm_mode="fake",
+            error=str(exc),
+            elapsed_sec=elapsed,
+        )
+        raise LLMError(f"가짜 모델 실패: {exc}", kind="fake") from exc
+
+    elapsed = round(time.monotonic() - started, 1)
+    logs.write("INFO", "llm_call", llm_mode="fake", elapsed_sec=elapsed)
+    return draft
+
+
 def _claude_plan_all(model: str, payload: str, trip: TripRequest) -> DayPlanDraft:
     """실제 Claude 를 1회 호출한다. [비용 발생]"""
     import anthropic
@@ -356,6 +443,7 @@ def load_api_key(key_var: str) -> str:
 def claude_call(client, model: str, payload: str):
     """SDK 를 부르고 실패를 전부 LLMError 로 바꾼다. 기록은 부르는 쪽에서 한다."""
     import anthropic
+    import pydantic
 
     try:
         response = client.messages.parse(
@@ -369,6 +457,14 @@ def claude_call(client, model: str, payload: str):
         )
     except anthropic.RateLimitError as exc:
         raise LLMError(f"호출 한도 초과: {exc}") from exc
+    # 시간 초과는 네트워크 실패의 한 종류라, 아래 APIConnectionError 보다 먼저 잡아야 갈린다
+    except anthropic.APITimeoutError as exc:
+        raise LLMError(
+            f"시간 초과 ({CLAUDE_TIMEOUT}초): {exc}", kind="timeout"
+        ) from exc
+    # SDK 가 응답 글자를 DayPlanDraft 로 읽다 실패했다 (깨진 JSON · 칸 누락 · 잘린 응답)
+    except pydantic.ValidationError as exc:
+        raise LLMError(f"응답 파싱 실패: {exc}", kind="parse") from exc
     except anthropic.APIConnectionError as exc:
         raise LLMError(f"네트워크 실패: {exc}") from exc
     except anthropic.APIStatusError as exc:
