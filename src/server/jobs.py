@@ -16,10 +16,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
+import traceback
 import uuid
 
+from src import logs, metrics
 from src.engine import graph
 from src.engine.nodes import InsufficientCandidates
+from src.llm.llm_plan import LLMError
 from src.models import Candidate, Itinerary, TripRequest
 from src.server import adapter
 
@@ -46,7 +50,18 @@ def start() -> list[asyncio.Task]:
     """큐를 만들고 워커를 띄운다. 서버가 올라올 때 한 번."""
     global job_queue
     job_queue = asyncio.Queue(maxsize=MAX_QUEUE)
+
+    # 올리고 내리는 코드를 따로 두지 않고, 긁어 갈 때마다 지금 상태를 센다 —
+    # 빠뜨린 경로가 있어도 숫자가 틀어지지 않는다
+    metrics.JOBS_QUEUED.set_function(job_queue.qsize)
+    metrics.JOBS_RUNNING.set_function(running_count)
+
     return [asyncio.create_task(worker()) for _ in range(MAX_CONCURRENCY)]
+
+
+def running_count() -> int:
+    """지금 만들고 있는 작업 수. /health 와 /metrics 가 같은 값을 본다."""
+    return sum(1 for job in jobs.values() if job["status"] == "processing")
 
 
 async def stop(workers: list[asyncio.Task]) -> None:
@@ -138,19 +153,28 @@ async def worker() -> None:
 
 async def _process(job: dict) -> None:
     job["status"] = "processing"
+    metrics.start_job_timing()
+    started = time.monotonic()
     try:
         itinerary = await asyncio.wait_for(_generate(job), JOB_TIMEOUT)
     except asyncio.TimeoutError:
         # 실은 계속 돌고 있다. wait_for 는 스레드를 죽이지 못한다 —
         # 그래서 LLM 쪽 타임아웃을 JOB_TIMEOUT 보다 낮게 잡아 뒀다 (llm_plan.CLAUDE_TIMEOUT).
-        _fail(job, "generation_timeout", "일정 생성 시간이 초과되었습니다.")
+        _fail(
+            job, "generation_timeout", "일정 생성 시간이 초과되었습니다.", "job_timeout"
+        )
     except InsufficientCandidates as exc:
-        _fail(job, "insufficient_candidates", str(exc))
+        _fail(job, "insufficient_candidates", str(exc), "insufficient_candidates")
+    except LLMError as exc:
+        _fail(job, "generation_failed", str(exc), f"llm_{exc.kind}")
     except Exception as exc:
-        # 모델 호출·응답 검사 실패(LLMError)도 여기로 온다
-        _fail(job, "generation_failed", str(exc))
+        # 예상 못 한 오류. 원인을 찾으려면 어디서 났는지가 필요하다
+        detail = "".join(traceback.format_exception(exc))
+        _fail(job, "generation_failed", str(exc), "application_exception", detail)
     else:
         _succeed(job, itinerary)
+    finally:
+        metrics.JOB_DURATION.observe(time.monotonic() - started)
 
 
 async def _generate(job: dict) -> Itinerary:
@@ -169,13 +193,32 @@ def _succeed(job: dict, itinerary: Itinerary) -> None:
     빈 날이 있으면 llm_plan 의 검사가 먼저 멈춘다.
     """
     job.update(status="completed", result=adapter.to_response(job["trip"], itinerary))
+    metrics.observe_post_processing()
+    metrics.JOBS_TOTAL.labels(result="success").inc()
 
 
-def _fail(job: dict, code: str, message: str) -> None:
+def _fail(
+    job: dict, code: str, message: str, kind: str, detail: str | None = None
+) -> None:
     """
-    왜 멈췄는지 적는다.
+    왜 멈췄는지 작업에 적고, 로그와 /metrics 에도 남긴다.
+
+    code 는 계약서의 오류 코드(백엔드가 본다), kind 는 우리가 원인을 가르는 이름이다
+    (로그·metrics 만 본다). generation_failed 하나에 LLM 오류·파싱 오류·예상 못 한 오류가
+    뭉쳐 있어서 따로 둔다. detail 은 오류 경로(traceback) — 예상 못 한 오류에만 붙인다.
 
     재시도 가능 여부는 담지 않는다 — 계약서가 코드별로 정해 두었고(8장),
     다시 시도할지는 백엔드가 판단한다.
     """
     job.update(status="failed", error={"code": code, "message": message})
+    metrics.JOBS_TOTAL.labels(result="failed").inc()
+    metrics.GENERATION_ERRORS.labels(kind=kind).inc()
+    logs.write(
+        "ERROR",
+        "generation_failed",
+        job_id=job["job_id"],
+        code=code,
+        kind=kind,
+        error=message,
+        traceback=detail,
+    )

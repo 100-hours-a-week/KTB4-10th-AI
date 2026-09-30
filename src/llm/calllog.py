@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
+from src import logs
 from src.paths import REPO_ROOT
 
 OUT_DIR = REPO_ROOT / "_out"  # 산출물은 전부 여기 아래. 커밋되지 않는다
@@ -29,8 +29,8 @@ CALL_DIR = OUT_DIR / "llm_calls"  # 호출마다 파일 하나
 # scripts/replay_llm_call.py 에 붙일 수 있다.
 CALL_DIR_REL = CALL_DIR.relative_to(REPO_ROOT)
 
-# "0" 이면 기록 파일을 남기지 않고 화면 한 줄만 찍는다. 서버(도커)용 — 컨테이너 안에 쌓여 봐야
-# 재배포하면 사라지고, 화면 한 줄은 docker logs 에 남는다. 로컬은 비워 두면 지금처럼 남긴다.
+# "0" 이면 기록 파일을 남기지 않고 로그 한 줄(JSON)만 찍는다. 서버(도커)용 — 컨테이너 안에 쌓여 봐야
+# 재배포하면 사라지고, 로그 한 줄은 docker logs 에 남는다. 로컬은 비워 두면 지금처럼 남긴다.
 SAVE_VAR = "SAVE_LLM_CALLS"
 
 # 마지막으로 남긴 호출 기록 파일. run.py 가 결과와 호출을 이어 붙일 때 읽는다 —
@@ -106,7 +106,7 @@ def record(
     elapsed: float | None = None,
 ) -> None:
     """
-    나간 호출 한 건을 파일 하나로 남기고, 목차에 한 줄 더한다. 화면에도 찍는다.
+    나간 호출 한 건을 파일 하나로 남기고, 목차에 한 줄 더한다. 로그에도 한 줄 찍는다.
 
     파일을 남기는 이유는 둘이다 — 무료 등급에도 분당·일일 한도가 있어 "오늘 몇 번
     불렀나"가 스크롤에 밀리면 안 되고, "왜 이렇게 짰지"를 나중에 보려면 **그때 준 후보**와
@@ -208,19 +208,33 @@ def _print_call(
     elapsed: float | None = None,
 ) -> None:
     """
-    화면 한 줄. 실패했으면 어디를 열어보면 되는지까지 알려준다.
-    파일을 안 남겼으면(filename 이 None) 열어 볼 곳이 없으니 실패 이유를 그 자리에 적는다.
+    로그 한 줄 (JSON). 기록 파일을 남겼으면 어디를 열어보면 되는지 record_file 에 적는다.
+
+    실패 이유는 파일이 있어도 로그에 같이 적는다. 서버(도커)에서 로그만 보고도
+    원인을 알 수 있어야 한다 — 파일은 컨테이너 안에 있어 바로 못 연다.
     """
-    where = f"{CALL_DIR_REL}/{filename}" if filename else "기록 저장 안 함"
+    record_file = f"{CALL_DIR_REL}/{filename}" if filename else None
+    seconds = round(elapsed, 1) if elapsed is not None else None
     if error is not None:
-        reason = where if filename else error
-        print(f"[LLM] {model} · 실패 · {reason}", file=sys.stderr)
+        logs.write(
+            "ERROR",
+            "llm_call_failed",
+            llm_mode="real",
+            model=model,
+            error=error,
+            elapsed_sec=seconds,
+            record_file=record_file,
+        )
         return
 
-    cost_text = f" · 약 ${cost:.4f}" if cost is not None else ""
-    time_text = f" · {elapsed:.1f}초" if elapsed is not None else ""
-    print(
-        f"[LLM] {model} · 입력 {input_tokens} · 출력 {output_tokens}{cost_text}{time_text}"
-        f" · {where}",
-        file=sys.stderr,
+    logs.write(
+        "INFO",
+        "llm_call",
+        llm_mode="real",
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=round(cost, 4) if cost is not None else None,
+        elapsed_sec=seconds,
+        record_file=record_file,
     )
