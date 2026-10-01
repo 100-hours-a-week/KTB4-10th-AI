@@ -45,11 +45,15 @@ def prepare(state: GraphState) -> dict:
     start = dates.parse_backend(request.start_date)
     end = dates.parse_backend(request.end_date)
 
-    wanted = [
-        data.DETAIL_TO_LCLS2[code]
-        for code in request.detail_codes
-        if code in data.DETAIL_TO_LCLS2
+    known_codes = [
+        code for code in request.detail_codes if code in data.DETAIL_TO_LCLS2
     ]
+    main_lcls2 = [data.DETAIL_TO_LCLS2[code] for code in known_codes]
+    extra_lcls2 = [
+        extra for code in known_codes for extra in data.EXTRA_LCLS2.get(code, [])
+    ]
+    # 넓히기는 1:1 표의 대분류만 — EXTRA 는 관심사 일치에만 쓴다
+    families = sorted({code[:2] for code in main_lcls2})
 
     # 스타일을 여러 개 골랐으면 적게 넣는 쪽을 따른다
     per_day_choices = [
@@ -60,7 +64,8 @@ def prepare(state: GraphState) -> dict:
         "start_yyyymmdd": dates.to_tourapi(start),
         "end_yyyymmdd": dates.to_tourapi(end),
         "day_count": (end - start).days + 1,
-        "wanted_lcls2": wanted,
+        "wanted_lcls2": main_lcls2 + extra_lcls2,
+        "wanted_families": families,
         "per_day": min(per_day_choices) if per_day_choices else DEFAULT_PER_DAY,
     }
 
@@ -122,8 +127,7 @@ def find_places(state: GraphState) -> dict:
     중분류가 고른 중분류를 밀어내지 않게 하려는 것이다.
     """
     wanted = set(state["wanted_lcls2"])
-    # 코드 앞 두 글자가 대분류다 (LS03 → LS)
-    wanted_families = {code[:2] for code in wanted}
+    wanted_families = set(state["wanted_families"])
     needed = state["day_count"] * state["per_day"]
 
     pool = _place_pool(state)

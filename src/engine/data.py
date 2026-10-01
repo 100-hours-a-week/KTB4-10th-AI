@@ -25,8 +25,8 @@ PREFERENCE_ENUM_PATH = REPO_ROOT / "data" / "user_category_enum.csv"
 PLACE_THEMES = frozenset({"NA", "EX", "HS", "LS", "VE"})
 
 # user_category_enum.csv 의 DETAIL 코드 -> TourAPI lclsSystm2. 두 체계가 1:1로 붙는다.
-# VE만 구멍이 있다: VE03·VE05·VE06·VE08~VE12가 어느 DETAIL에도 안 붙어
-# 취향 일치로는 안 잡히고 채우기 경로로만 들어온다.
+# VE만 구멍이 있다: VE05·VE06·VE08~VE12가 어느 DETAIL에도 안 붙어
+# 취향 일치로는 안 잡히고 채우기 경로로만 들어온다. VE03 은 아래 EXTRA_LCLS2 로 붙였다.
 DETAIL_TO_LCLS2 = {
     "NATURE_MOUNTAIN": "NA01",
     "NATURE_RIVER_SEA": "NA02",
@@ -55,6 +55,13 @@ DETAIL_TO_LCLS2 = {
     "EVENTS_FESTIVAL": "EV01",
     "EVENTS_CONCERT": "EV02",
     "EVENTS_FAIR": "EV03",
+}
+
+# 취향 하나가 TourAPI 중분류 둘에 걸치는 경우. DETAIL_TO_LCLS2 에 더해 관심사로만 잡는다.
+# 넓히기(같은 대분류) 기준에는 넣지 않는다 — 넣으면 공원이 모자란 지역에서
+# VE 전체(교육시설·청소년회관…)가 "비슷한 것"으로 끼어든다.
+EXTRA_LCLS2 = {
+    "NATURE_PARK": ["VE03"],  # 도시공원. 자연공원(NA04)만으로는 도시 지역 공원을 못 잡는다
 }
 
 
