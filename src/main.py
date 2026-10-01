@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src import logs, metrics
-from src.llm import fake_llm, llm_plan
+from src.llm import calllog, fake_llm, llm_plan
 from src.server import adapter, jobs
 
 
@@ -37,6 +37,7 @@ from src.server import adapter, jobs
 async def lifespan(app: FastAPI):
     # 설정이 틀렸으면 첫 요청에서야 실패한다. 켜기 전에 막는다
     mode = llm_plan.llm_mode()
+    save = calllog.save_mode()
     if mode == "fake":
         # 운영 서버에서 부하 테스트를 한다. 가짜로 켜진 걸 모르고 지나가면 안 된다
         logs.write(
@@ -51,7 +52,9 @@ async def lifespan(app: FastAPI):
     else:
         llm_plan.load_api_key(llm_plan.ANTHROPIC_KEY_VAR)
     metrics.LLM_MODE.labels(llm_mode=mode).set(1)
-    logs.write("INFO", "server_start", llm_mode=mode)
+    # 기록이 켜졌는지는 여기서 본다 (서버는 OFF 여야 한다)
+    save_label = "ON" if save else "OFF"
+    logs.write("INFO", "server_start", llm_mode=mode, save_mode=save_label)
 
     workers = jobs.start()
     yield
@@ -127,7 +130,7 @@ def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
 
 
 @app.get("/health")
-def health() -> dict:
+async def health() -> dict:
     """
     계약에 없는 우리 것. 큐가 밀리는지, 가짜 모드로 켜져 있지 않은지 보려고 둔다.
     부하 테스트가 끝나면 llm_mode 가 real 인지 여기서 확인한다.
@@ -142,7 +145,7 @@ def health() -> dict:
 
 
 @app.get("/metrics")
-def metrics_endpoint() -> Response:
+async def metrics_endpoint() -> Response:
     """
     Prometheus 형식의 숫자. 인프라의 Prometheus 가 긁어 간다 (외부 접근은 인프라가 막는다).
 
@@ -153,13 +156,19 @@ def metrics_endpoint() -> Response:
 
 
 @app.post("/guidebooks-generations", status_code=202)
-def create_generation(payload: dict) -> dict:
+async def create_generation(payload: dict) -> dict:
     """
     본문을 dict 로 그대로 받는다. 계약서 2장의 필드가 **최상위에 평평하게** 온다.
 
     스키마를 pydantic 으로 박지 않는 이유: 계약서는 틀린 곳마다 다른 오류 코드를 요구한다
     (invalid_date_range · invalid_preference_mapping · invalid_request). pydantic 에 맡기면
     전부 한 가지 검증 오류로 뭉쳐 온다. 그래서 검증은 adapter 가 항목별로 한다.
+
+    엔드포인트 넷이 모두 async def 인 이유: def 면 FastAPI 가 스레드 여러 개에서 동시에
+    돌린다. 그러면 같은 request_id 두 개가 existing() 을 함께 통과해 작업이 둘 생기고
+    (= 두 번 과금), 이벤트 루프 전용인 asyncio.Queue 를 다른 스레드가 만지게 된다.
+    async def 는 이벤트 루프 하나에서 await 없이 끝까지 도므로 끼어들 틈이 없다.
+    **안에서 오래 걸리는 일을 하면 안 된다** — 그동안 서버 전체가 멈춘다.
     """
     request_id = payload.get("request_id")
     if not isinstance(request_id, str) or not request_id:
@@ -190,7 +199,7 @@ def create_generation(payload: dict) -> dict:
         raise HTTPException(400, detail=exc.code) from exc
 
     try:
-        job = jobs.accept(trip, places, events, request_id, mark)
+        job = jobs.accept(trip, places, events, request_id, mark, payload)
     except asyncio.QueueFull:
         # 부하 테스트에서 가장 먼저 볼 숫자다 (클라우드팀 요청: 거절 건수)
         metrics.JOBS_TOTAL.labels(result="rejected").inc()
@@ -203,7 +212,7 @@ def create_generation(payload: dict) -> dict:
 
 
 @app.get("/guidebooks-generations/{job_id}")
-def get_generation(job_id: str) -> dict:
+async def get_generation(job_id: str) -> dict:
     job = jobs.jobs.get(job_id)
     if job is None:
         raise HTTPException(404, detail="job_not_found")

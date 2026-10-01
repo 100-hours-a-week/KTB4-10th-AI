@@ -27,6 +27,7 @@ from __future__ import annotations
 import collections
 import json
 import os
+import re
 import time
 from datetime import date, timedelta
 
@@ -39,9 +40,12 @@ DEFAULT_MODEL = "claude-sonnet-5"
 MAX_TOKENS = 16000
 EFFORT = "medium"  # 기본값은 high. 일정 배치가 무거운 일이 아니라 낮춰서 시작한다
 
-# Claude SDK 호출 한 건의 상한. 서버의 작업 타임아웃(jobs.JOB_TIMEOUT)보다 낮아야 한다 —
-# SDK 기본값은 10분 × 재시도라, 작업은 실패로 접혔는데 실이 30분 넘게 붙잡히는 일이 생긴다.
-CLAUDE_TIMEOUT = 240
+# Claude SDK 호출 한 건의 상한. SDK 는 **시간 초과도 재시도**하므로 시간 초과가 두 번
+# 이어지면 140 × 2 + 재시도 대기(이때는 8초 이하) = 288초다. 이 값이 서버의 작업 타임아웃
+# (jobs.JOB_TIMEOUT 300초)보다 짧아야 작업이 실패로 접힌 뒤 실이 혼자 계속 돌지 않는다.
+# 다만 서버가 429·5xx 에 retry-after 를 붙이면 SDK 는 그만큼 상한 없이 기다려 300초를
+# 넘을 수 있다 (드묾). 실측 호출은 8.5~57.5초라 정상 응답을 끊을 일은 거의 없다.
+CLAUDE_TIMEOUT = 140
 CLAUDE_MAX_RETRIES = 1
 
 ENV_PATH = REPO_ROOT / ".env"
@@ -87,6 +91,10 @@ def llm_mode() -> str:
 
 # 하루에 둘 수 있는 행사 수. 프롬프트·페이로드·검사 세 군데가 같은 값을 봐야 한다.
 MAX_EVENTS_PER_DAY = 1
+
+# 시작 시각 00:00 ~ 23:59. 시는 한 자리도 받는다 — 모델이 '9:00' 으로 줄 때가 있고
+# 그건 맞는 시각이다. '25:00'·'9:7'·'아침' 은 거절한다.
+CLOCK_TIME = re.compile(r"([01]?[0-9]|2[0-3]):[0-5][0-9]")
 
 SYSTEM_PROMPT = """당신은 여행 일정을 짜는 도우미입니다.
 
@@ -248,8 +256,8 @@ def _validate_all(
     """
     모델이 돌려준 것이 규칙을 지켰는지 본다. 하나라도 어긋나면 멈춘다.
 
-    여섯 가지를 보는데 성격이 둘로 갈린다 — **행사 기간 검사만이 사실 검사**이고
-    (어기면 사용자에게 거짓 정보가 나간다), 나머지 다섯은 우리가 정한 형식·규칙이다.
+    일곱 가지를 보는데 성격이 둘로 갈린다 — **행사 기간 검사만이 사실 검사**이고
+    (어기면 사용자에게 거짓 정보가 나간다), 나머지 여섯은 우리가 정한 형식·규칙이다.
 
     order 관련 검사 둘은 없앴다. 모델이 order 를 안 돌려주므로 어긋날 수가 없다.
     """
@@ -274,6 +282,14 @@ def _validate_all(
     out_of_range = sorted({i.day for i in items if not 1 <= i.day <= day_count})
     if out_of_range:
         raise LLMError(f"없는 날짜입니다 (1~{day_count}): {out_of_range}")
+
+    # 시각은 뒤에서 nodes.number_by_time 이 순서를 매길 때 쓴다. 여기서 막아 두어야
+    # 형식 오류도 다른 규칙 위반과 같은 validation 으로 집계된다
+    bad_times = sorted(
+        {i.start_time for i in items if not CLOCK_TIME.fullmatch(i.start_time)}
+    )
+    if bad_times:
+        raise LLMError(f"시각이 00:00~23:59 의 시:분 형식이 아닙니다: {bad_times}")
 
     # 여기만 사실 검사다. 열리지 않는 날에 행사를 두면 그대로 거짓 정보가 된다
     misplaced = []

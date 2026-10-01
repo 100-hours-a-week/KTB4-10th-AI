@@ -19,10 +19,12 @@ import json
 import time
 import traceback
 import uuid
+from datetime import datetime
 
 from src import logs, metrics
 from src.engine import graph
 from src.engine.nodes import InsufficientCandidates
+from src.llm import calllog
 from src.llm.llm_plan import LLMError
 from src.models import Candidate, Itinerary, TripRequest
 from src.server import adapter
@@ -100,18 +102,26 @@ def accept(
     events: list[Candidate],
     request_id: str,
     mark: str,
+    request: dict,
 ) -> dict:
-    """작업을 만들어 큐에 넣는다. 큐가 만원이면 QueueFull 이 올라간다."""
+    """
+    작업을 만들어 큐에 넣는다. 큐가 만원이면 QueueFull 이 올라간다.
+
+    request 는 백엔드가 보낸 본문 그대로다 — 끝날 때 generations/ 기록에 넣는다.
+    """
     job = {
         "job_id": str(uuid.uuid4()),
         "status": "pending",
         "result": None,
         "error": None,
-        # 아래 넷은 워커와 멱등 판단만 본다. 응답에서는 뺀다
+        # 아래는 워커·멱등 판단·기록만 본다. 응답에서는 뺀다
         "trip": trip,
         "places": places,
         "events": events,
         "fingerprint": mark,
+        "request_id": request_id,
+        "request": request,
+        "accepted_at": datetime.now(calllog.KST),
     }
 
     # 저장소에 먼저 넣는다. 큐에 먼저 넣으면 워커가 꺼냈을 때 아직 없을 수 있다.
@@ -154,12 +164,19 @@ async def worker() -> None:
 async def _process(job: dict) -> None:
     job["status"] = "processing"
     metrics.start_job_timing()
+    # 이 작업의 LLM 기록 파일 이름을 받을 상자. 워커마다 제 문맥이라 작업끼리 섞이지 않고,
+    # to_thread 로 넘긴 실도 같은 상자를 본다 (calllog._CURRENT_RUN 설명 참고)
+    calllog.start_run()
     started = time.monotonic()
+    # _succeed 도 try 안에 둔다. else 에 두면 그 안의 예외(응답 만들기·HTML 그리기)는
+    # 아래 except 들이 못 잡고 worker() 의 루프를 끊는다 — 워커가 조용히 하나씩 사라진다
     try:
         itinerary = await asyncio.wait_for(_generate(job), JOB_TIMEOUT)
+        _succeed(job, itinerary)
     except asyncio.TimeoutError:
         # 실은 계속 돌고 있다. wait_for 는 스레드를 죽이지 못한다 —
-        # 그래서 LLM 쪽 타임아웃을 JOB_TIMEOUT 보다 낮게 잡아 뒀다 (llm_plan.CLAUDE_TIMEOUT).
+        # 그래서 LLM 쪽 최악 소요(재시도 포함)를 JOB_TIMEOUT 보다 짧게 잡아 뒀다
+        # (llm_plan.CLAUDE_TIMEOUT).
         _fail(
             job, "generation_timeout", "일정 생성 시간이 초과되었습니다.", "job_timeout"
         )
@@ -171,10 +188,41 @@ async def _process(job: dict) -> None:
         # 예상 못 한 오류. 원인을 찾으려면 어디서 났는지가 필요하다
         detail = "".join(traceback.format_exception(exc))
         _fail(job, "generation_failed", str(exc), "application_exception", detail)
-    else:
-        _succeed(job, itinerary)
     finally:
         metrics.JOB_DURATION.observe(time.monotonic() - started)
+
+    _save_generation(job)
+
+
+def _save_generation(job: dict) -> None:
+    """
+    끝난 작업을 generations/ 에 남긴다 (SAVE_MODE=ON 일 때만).
+
+    **어떤 예외든** 경고만 남긴다 (파일 쓰기 실패만이 아니다). 작업은 이미 끝났고,
+    여기서 예외가 새면 worker() 의 루프가 끊겨 워커가 하나씩 사라진다 — 셋 다 사라지면
+    새 작업이 영원히 pending 이고, 서버를 끌 때도 큐가 안 비어 멈춘다 (2026-10-01 재현).
+    """
+    try:
+        # 백엔드가 조회(GET)로 받는 것과 같은 모양 (main._envelope 의 봉투)
+        response = {"message": f"guidebook_{job['status']}", "data": public(job)}
+        calllog.record_generation(
+            request_id=job["request_id"],
+            job_id=job["job_id"],
+            accepted_at=job["accepted_at"],
+            request=job["request"],
+            llm_call=calllog.last_call_file(),
+            response=response,
+        )
+    except Exception as exc:
+        # 파일 쓰기 실패가 아니면 우리 코드 문제다. 어디서 났는지 남긴다
+        detail = "".join(traceback.format_exception(exc))
+        logs.write(
+            "WARNING",
+            "generation_record_failed",
+            job_id=job["job_id"],
+            error=str(exc),
+            traceback=detail,
+        )
 
 
 async def _generate(job: dict) -> Itinerary:

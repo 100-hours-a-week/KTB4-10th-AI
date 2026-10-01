@@ -14,7 +14,6 @@ from datetime import timedelta
 from src import dates
 from src.engine import data, distance
 from src.llm import llm_plan
-from src.llm.llm_plan import LLMError
 from src.models import (
     Candidate,
     Coordinates,
@@ -244,11 +243,9 @@ def trip_conditions(request: TripRequest) -> dict:
 
 
 def _minutes(hhmm: str) -> int:
-    try:
-        hour, minute = hhmm.split(":")
-        return int(hour) * 60 + int(minute)
-    except ValueError as exc:
-        raise LLMError(f"시각 형식이 HH:MM 이 아닙니다: {hhmm!r}") from exc
+    """형식은 llm_plan._validate_all 이 이미 확인했다 (CLOCK_TIME)."""
+    hour, minute = hhmm.split(":")
+    return int(hour) * 60 + int(minute)
 
 
 def number_by_time(drafts: list[PlanDraftItem]) -> list[PlanItem]:

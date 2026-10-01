@@ -1,7 +1,9 @@
 """
 src/llm/calllog.py
 
-모델을 부른 기록을 남긴다. 호출 자체는 여기 없다 (llm_plan.py 가 한다).
+모델을 부른 기록과, 서버가 받은 생성 요청 하나의 기록을 남긴다. 호출 자체는 여기 없다
+(llm_plan.py 가 한다). 둘은 SAVE_MODE 하나로 함께 켜고 끈다 — 셋(요청·LLM 응답·최종 응답)이
+같이 있어야 "왜 이렇게 나왔나"를 볼 수 있다.
 
 파일로 남기는 이유는 둘이다 — 무료 등급에도 분당·일일 한도가 있어 "오늘 몇 번
 불렀나"가 스크롤에 밀리면 안 되고, "왜 이렇게 짰지"를 나중에 보려면 **그때 준 후보**와
@@ -15,8 +17,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from src import logs
 from src.paths import REPO_ROOT
@@ -24,17 +28,18 @@ from src.paths import REPO_ROOT
 OUT_DIR = REPO_ROOT / "_out"  # 산출물은 전부 여기 아래. 커밋되지 않는다
 CALL_LOG_PATH = OUT_DIR / "llm_calls.jsonl"  # 목차
 CALL_DIR = OUT_DIR / "llm_calls"  # 호출마다 파일 하나
+GENERATION_DIR = OUT_DIR / "generations"  # 서버가 받은 생성 요청마다 파일 하나
 
 # 기록을 가리키는 문자열은 **저장소 뿌리 기준 상대경로**다. 터미널에 찍힌 값을 그대로
 # scripts/replay_llm_call.py 에 붙일 수 있다.
 CALL_DIR_REL = CALL_DIR.relative_to(REPO_ROOT)
 
-# "0" 이면 기록 파일을 남기지 않고 로그 한 줄(JSON)만 찍는다. 서버(도커)용 — 컨테이너 안에 쌓여 봐야
-# 재배포하면 사라지고, 로그 한 줄은 docker logs 에 남는다. 로컬은 비워 두면 지금처럼 남긴다.
-SAVE_VAR = "SAVE_LLM_CALLS"
+# ON 이면 기록 파일을 남기고, OFF 면 로그 한 줄(JSON)만 찍는다. 서버는 OFF, 로컬은 ON.
+# 기본값은 없다 — save_mode() 참고.
+SAVE_VAR = "SAVE_MODE"
 
-# 마지막으로 남긴 호출 기록 파일. run.py 가 결과와 호출을 이어 붙일 때 읽는다 —
-# 시각으로 짐작하지 않고 파일 이름으로 잇는다.
+# 마지막으로 남긴 호출 기록 파일. run.py 와 서버 워커(jobs._process)가 결과와 호출을
+# 이어 붙일 때 읽는다 — 시각으로 짐작하지 않고 파일 이름으로 잇는다.
 #
 # **그냥 전역이 아니라 ContextVar 다.** 서버에서 작업 여럿을 나란히 돌리면 전역은
 # 서로 덮어쓴다 — A 가 부른 직후 B 가 부르면 A 가 B 의 기록 파일을 자기 것으로 적는다.
@@ -93,6 +98,34 @@ def _readable(response_text: str | None) -> object:
         return response_text
 
 
+def save_mode() -> bool:
+    """
+    SAVE_MODE 를 읽는다. ON 이면 True, OFF 면 False. 대소문자는 가리지 않는다.
+
+    안 적었거나 모르는 값이면 멈춘다. 기본값을 두면 "끈 줄 알았는데 서버에 쌓이는" 일을
+    알아챌 길이 없다 (예전 SAVE_LLM_CALLS 는 "0" 이 아니면 전부 켜짐으로 읽었다).
+    서버는 켜질 때, tools/run.py 는 돌리기 전에 불러 미리 막는다.
+    """
+    raw = os.environ.get(SAVE_VAR, "")
+    value = raw.strip().upper()
+    if value == "ON":
+        return True
+    if value == "OFF":
+        return False
+    raise ValueError(f"{SAVE_VAR} 는 ON 또는 OFF 여야 합니다: {raw!r}")
+
+
+def _unique_path(folder: Path, stem: str) -> Path:
+    """같은 초에 두 번 남기면 이름이 겹쳐 앞의 기록이 덮인다 (검증 중 실제로 겪었다)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{stem}.json"
+    serial = 2
+    while path.exists():
+        path = folder / f"{stem}-{serial}.json"
+        serial += 1
+    return path
+
+
 def record(
     model: str,
     request: dict,
@@ -124,21 +157,13 @@ def record(
     근거가 이것뿐인데, 예전에는 기록에 없어서 매번 손으로 재야 했다.
     **2026-09-27 에 추가했다 — 그 이전 기록에는 이 칸이 없다.**
     """
-    if os.environ.get(SAVE_VAR) == "0":
+    if not save_mode():
         _print_call(model, None, error, input_tokens, output_tokens, cost, elapsed)
         return
 
     now = datetime.now(KST)
     provider = model.split("-")[0]
-    stem = f"{now:%y%m%d-%H%M%S}-{provider}"
-
-    # 같은 초에 두 번 나가면 이름이 겹쳐 앞의 기록이 덮인다 (검증 중 실제로 겪었다)
-    CALL_DIR.mkdir(parents=True, exist_ok=True)
-    path = CALL_DIR / f"{stem}.json"
-    serial = 2
-    while path.exists():
-        path = CALL_DIR / f"{stem}-{serial}.json"
-        serial += 1
+    path = _unique_path(CALL_DIR, f"{now:%y%m%d-%H%M%S}-{provider}")
     filename = path.name
 
     detail = {
@@ -174,12 +199,52 @@ def record(
     _print_call(model, filename, error, input_tokens, output_tokens, cost, elapsed)
 
 
+def record_generation(
+    *,
+    request_id: str,
+    job_id: str,
+    accepted_at: datetime,
+    request: dict,
+    llm_call: str | None,
+    response: dict,
+) -> None:
+    """
+    서버가 받은 생성 요청 하나를 파일 하나로 남긴다. SAVE_MODE=OFF 면 남기지 않는다.
+
+    LLM 기록(llm_calls/)만으로는 어느 요청에서 나온 호출인지, 백엔드가 최종으로 무엇을
+    받았는지 알 수 없다. 그래서 백엔드 요청 원본 · LLM 기록 파일 이름 · 최종 응답을 한 파일에
+    묶는다. llm_call 은 모델을 안 불렀거나(가짜 모드·호출 전 실패) 호출이 아직 안 끝났으면
+    (작업 시간 초과) None 이다.
+
+    파일 이름은 접수 시각 + request_id — 시간순으로 서고, 백엔드 쪽 번호로 바로 찾는다.
+    """
+    if not save_mode():
+        return
+
+    # request_id 는 백엔드가 정한다 (계약 형식은 "123-0"). 경로 문자가 섞여도 폴더 밖에 쓰지 않게
+    safe_id = re.sub(r"[^\w-]", "_", request_id)
+    path = _unique_path(GENERATION_DIR, f"{accepted_at:%y%m%d-%H%M%S}-{safe_id}")
+    finished_at = datetime.now(KST)
+
+    detail = {
+        "request_id": request_id,
+        "job_id": job_id,
+        "status": response["data"]["status"],
+        "accepted_at": accepted_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "request": request,
+        "llm_call": llm_call,
+        "response": response,
+    }
+    path.write_text(json.dumps(detail, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def start_run() -> None:
     """
     이 실행 흐름의 기록 상자를 새로 만든다. 그래프를 돌리기 **전에** 부른다.
 
     안 부르면 last_call_file() 이 늘 None 이다 — 기록 파일은 그대로 남고, 결과와
-    잇는 이름표만 빠진다. 서버는 이름표를 쓰지 않아서 부르지 않는다.
+    잇는 이름표만 빠진다. 서버는 작업마다 부른다 (generations/ 기록에 이름을 적으려고).
     """
     _CURRENT_RUN.set({"last_call_file": None})
 
