@@ -36,8 +36,8 @@ from src.server import adapter, jobs
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 설정이 틀렸으면 첫 요청에서야 실패한다. 켜기 전에 막는다
-    mode = llm_plan.llm_mode()
-    save = calllog.save_mode()
+    mode = llm_plan.llm_mode()  # real or fake
+    save = calllog.save_mode()  # True or False (ON or OFF)
     if mode == "fake":
         # 운영 서버에서 부하 테스트를 한다. 가짜로 켜진 걸 모르고 지나가면 안 된다
         logs.write(
@@ -45,19 +45,23 @@ async def lifespan(app: FastAPI):
             "fake_llm_mode",
             message=(
                 "가짜 LLM 모드 — 실제 모델을 부르지 않는다. "
-                "테스트 뒤 LLM_MODE 를 지우고 재기동할 것"
+                "테스트 뒤 LLM_MODE 를 real로 바꾸고 재기동할 것"
             ),
             delay_sec=fake_llm.delay_seconds(),
         )
     else:
         llm_plan.load_api_key(llm_plan.ANTHROPIC_KEY_VAR)
     metrics.LLM_MODE.labels(llm_mode=mode).set(1)
+
     # 기록이 켜졌는지는 여기서 본다 (서버는 OFF 여야 한다)
     save_label = "ON" if save else "OFF"
     logs.write("INFO", "server_start", llm_mode=mode, save_mode=save_label)
 
-    workers = jobs.start()
+    workers = jobs.start()  # 큐 생성 + 워커 3개
+
+    # 여기서 서버가 요청을 받는 동안 멈춰 있다. (yield 앞이 서버 켤 때, 뒤가 끌 때)
     yield
+    # 끌 때 : 큐가 빌 때까지 기다린 뒤 워커 취소하기 (이미 시작된 호출을 버리지 않으려고)
     await jobs.stop(workers)
 
 
@@ -91,6 +95,7 @@ async def _count_requests(request: Request, call_next):
     return response
 
 
+# 응답 형태를 통일시켜 준다.
 def _envelope(message: str, data: dict | None = None) -> dict:
     return {"message": message, "data": data}
 
@@ -161,8 +166,9 @@ async def create_generation(payload: dict) -> dict:
     본문을 dict 로 그대로 받는다. 계약서 2장의 필드가 **최상위에 평평하게** 온다.
 
     스키마를 pydantic 으로 박지 않는 이유: 계약서는 틀린 곳마다 다른 오류 코드를 요구한다
-    (invalid_date_range · invalid_preference_mapping · invalid_request). pydantic 에 맡기면
-    전부 한 가지 검증 오류로 뭉쳐 온다. 그래서 검증은 adapter 가 항목별로 한다.
+    (invalid_date_range · invalid_preference_mapping · invalid_request).
+    pydantic 에 맡기면 전부 한 가지 검증 오류로 뭉쳐 온다.
+    그래서 검증은 adapter 가 항목별로 한다.
 
     엔드포인트 넷이 모두 async def 인 이유: def 면 FastAPI 가 스레드 여러 개에서 동시에
     돌린다. 그러면 같은 request_id 두 개가 existing() 을 함께 통과해 작업이 둘 생기고
@@ -171,19 +177,20 @@ async def create_generation(payload: dict) -> dict:
     **안에서 오래 걸리는 일을 하면 안 된다** — 그동안 서버 전체가 멈춘다.
     """
     request_id = payload.get("request_id")
-    if not isinstance(request_id, str) or not request_id:
+    if not isinstance(request_id, str) or not request_id:  # 없거나 빈 문자열이면
         raise HTTPException(400, detail="invalid_request")
 
     mark = jobs.fingerprint(payload)
 
     # 응답이 유실되면 백엔드가 같은 번호로 다시 보낸다. 새 작업을 만들지 않는다
     try:
-        already = jobs.existing(request_id, mark)
+        already = jobs.existing(request_id, mark)  # return job
     except jobs.RequestIdConflict:
         raise HTTPException(409, detail="request_id_conflict") from None
     if already is not None:
         return _envelope("guidebook_accepted", jobs.accepted(already))
 
+    # 양식 바꾸기와 검증
     try:
         trip = adapter.to_trip_request(payload)
         places, events = adapter.to_candidates(payload.get("contents"))
@@ -198,6 +205,7 @@ async def create_generation(payload: dict) -> dict:
         )
         raise HTTPException(400, detail=exc.code) from exc
 
+    # 큐에 작업 넣기
     try:
         job = jobs.accept(trip, places, events, request_id, mark, payload)
     except asyncio.QueueFull:
@@ -213,8 +221,8 @@ async def create_generation(payload: dict) -> dict:
 
 @app.get("/guidebooks-generations/{job_id}")
 async def get_generation(job_id: str) -> dict:
-    job = jobs.jobs.get(job_id)
-    if job is None:
+    job = jobs.jobs.get(job_id)  # 저장소 jobs에서 꺼낸다.
+    if job is None:  # 없으면
         raise HTTPException(404, detail="job_not_found")
 
     # pending -> guidebook_pending, completed -> guidebook_completed ... (계약 5~8장)

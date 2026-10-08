@@ -23,7 +23,8 @@ KST = timezone(timedelta(hours=9))
 
 def write(level: str, event: str, **fields: object) -> None:
     """
-    level 은 INFO · WARNING · ERROR. event 는 무슨 일인지 짧은 영문 이름 (예: llm_call).
+    level 은 INFO · WARNING · ERROR.
+    event 는 무슨 일인지 짧은 영문 이름 (예: llm_call).
 
     나머지 칸은 부르는 쪽이 정한다. JSON 으로 못 바꾸는 값(날짜 등)은 문자열로 적는다.
     """

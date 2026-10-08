@@ -219,6 +219,7 @@ class GraphState(TypedDict, total=False):
     end_yyyymmdd: str
     day_count: int
     wanted_lcls2: list[str]
+    wanted_families: list[str]  # 넓히기(related)에 쓰는 대분류 (LS03 → LS)
     per_day: int
 
     # find_places / find_events (병렬)

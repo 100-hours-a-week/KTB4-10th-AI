@@ -96,6 +96,10 @@ MAX_EVENTS_PER_DAY = 1
 # 그건 맞는 시각이다. '25:00'·'9:7'·'아침' 은 거절한다.
 CLOCK_TIME = re.compile(r"([01]?[0-9]|2[0-3]):[0-5][0-9]")
 
+# 장소가 어느 단계에서 담겼는지 모델에게 알린다. 후보를 자리보다 많이 넘기므로
+# 이게 없으면 모델이 관심 장소를 빼고 아무 장소나 고를 수 있다
+FIT_LABELS = {"interest": "관심사", "related": "비슷한 분류", "filler": "그 밖"}
+
 SYSTEM_PROMPT = """당신은 여행 일정을 짜는 도우미입니다.
 
 여행 조건(trip), 여행 날짜(days), 후보(candidates)를 받습니다. 후보 중에서 골라
@@ -110,7 +114,8 @@ SYSTEM_PROMPT = """당신은 여행 일정을 짜는 도우미입니다.
 3. 행사(kind="행사")는 event_start_date ~ event_end_date 안의 날에만 둡니다.
    하루 최대 max_events_per_day 건, 전체 최대 max_events_total 건이며,
    남는 행사는 빼고 그 자리는 장소로 채웁니다.
-4. start_time 은 HH:MM(24시간), duration_minutes 는 분 단위 정수입니다.
+4. fit 이 "관심사"인 장소는 **모두** 배치합니다. 자리가 모자라면 관심사 장소로만 채웁니다.
+5. start_time 은 HH:MM(24시간), duration_minutes 는 분 단위 정수입니다.
 
 배치 요령:
 - **갈 수 있는 날이 적은 행사부터** 자리를 잡습니다. 아니면 하루만 열리는 행사가 빠집니다.
@@ -230,6 +235,8 @@ def _candidates_to_payload(
         if candidate.pick == "event":
             entry["event_start_date"] = _iso(candidate.event_start_date)
             entry["event_end_date"] = _iso(candidate.event_end_date)
+        else:
+            entry["fit"] = FIT_LABELS[candidate.pick]
         listed.append(entry)
 
     # 합계를 코드가 넣어 준다. days 길이 × per_day 를 모델이 곱하게 두면 개수를 놓친다
@@ -256,8 +263,8 @@ def _validate_all(
     """
     모델이 돌려준 것이 규칙을 지켰는지 본다. 하나라도 어긋나면 멈춘다.
 
-    일곱 가지를 보는데 성격이 둘로 갈린다 — **행사 기간 검사만이 사실 검사**이고
-    (어기면 사용자에게 거짓 정보가 나간다), 나머지 여섯은 우리가 정한 형식·규칙이다.
+    여덟 가지를 보는데 성격이 둘로 갈린다 — **행사 기간 검사만이 사실 검사**이고
+    (어기면 사용자에게 거짓 정보가 나간다), 나머지 일곱은 우리가 정한 형식·규칙이다.
 
     order 관련 검사 둘은 없앴다. 모델이 order 를 안 돌려주므로 어긋날 수가 없다.
     """
@@ -304,6 +311,19 @@ def _validate_all(
             misplaced.append(f"{candidate.name}({that_day} ∉ {begin}~{end})")
     if misplaced:
         raise LLMError(f"행사를 열리지 않는 날에 뒀습니다: {misplaced}")
+
+    # 관심사 아닌 장소를 넣었다면 관심 장소는 남김없이 들어가 있어야 한다.
+    # "관심 장소 전부"로 검사하지 않는 이유: 관심 장소가 자리보다 많거나 행사가 자리를
+    # 차지하면 전부 넣을 수 없다. 그때도 관심 장소만으로 채웠으면 규칙을 지킨 것이다
+    placed = set(returned)
+    placed_other = [cid for cid in placed if known[cid].pick in ("related", "filler")]
+    left_out = sorted(
+        c.name
+        for c in candidates
+        if c.pick == "interest" and c.content_id not in placed
+    )
+    if placed_other and left_out:
+        raise LLMError(f"관심사 장소를 빼고 다른 장소를 넣었습니다: {left_out}")
 
     for day in range(1, day_count + 1):
         of_day = [item for item in items if item.day == day]
@@ -435,11 +455,12 @@ def load_api_key(key_var: str) -> str:
     python-dotenv 를 쓰지 않는 이유는 의존성이 하나 더 늘어서다. 형식이 단순해 직접 읽는
     편이 낫다.
     """
+    # 환경변수
     from_env = os.environ.get(key_var, "").strip()
     if from_env:
         return from_env
 
-    if not ENV_PATH.exists():
+    if not ENV_PATH.exists():  # .env 파일이 없으면
         raise LLMError(f"환경변수 {key_var} 도 {ENV_PATH} 도 없습니다.")
 
     for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
