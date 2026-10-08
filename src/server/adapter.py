@@ -17,7 +17,9 @@ from src.models import Candidate, Itinerary, TripRequest
 from src.output import book_html
 
 MAX_DAYS = 7  # 계약 2장
-MAX_CONTENTS = 100
+# 백엔드는 그 지역 후보를 개수 제한 없이 전부 보낸다 (2026-10-07 결정). 덤프 기준 최대는
+# 제주시 441개 — 정상 요청은 걸리지 않고, 고장 난 요청만 막는 값이다
+MAX_CONTENTS = 1000
 MAX_TITLE = 15  # 계약 7장
 MIN_PEOPLE = 1
 MAX_PEOPLE = 10
@@ -39,7 +41,7 @@ class InputError(Exception):
 
 def to_trip_request(payload: dict) -> TripRequest:
     """
-    접수 요청을 v0 의 조건으로 바꾼다.
+    접수 요청을 src의 조건으로 바꾼다.
 
     지역명·날짜·취향을 여기서 확인한다. 코드표에 없는 값은 작업이 실패한 게 아니라
     요청이 틀린 것이다 — 큐에 넣고 1분 뒤에 실패로 알릴 일이 아니라 접수 시점에 거절할 일이다.
@@ -47,11 +49,13 @@ def to_trip_request(payload: dict) -> TripRequest:
     region = payload.get("region")
     if not isinstance(region, dict):
         raise InputError("invalid_request", "region 이 없습니다")
+
     # 계약 필수다. 빠진 채 받으면 시/도 전체 여행으로 조용히 바뀐다
     # (시/도 전체는 CLI 에서만 쓴다 — 여기를 거치지 않는다)
     if not region.get("city"):
         raise InputError("invalid_request", "region.city 가 없습니다")
 
+    # 중분류와 여행스타일을 코드로 변환
     detail_codes, travel_styles = _to_preference_codes(payload.get("preferences"))
 
     try:
@@ -74,7 +78,7 @@ def to_trip_request(payload: dict) -> TripRequest:
             "invalid_request", f"people_count 는 {MIN_PEOPLE}~{MAX_PEOPLE} 입니다"
         )
 
-    _check_dates(trip)
+    _check_dates(trip)  # 날짜 형식과 기간 체크
 
     try:
         data.find_region_codes(trip.province, trip.city)
@@ -85,7 +89,7 @@ def to_trip_request(payload: dict) -> TripRequest:
 
 
 def _check_dates(trip: TripRequest) -> None:
-    """날짜 형식은 우리 것(YY.MM.DD)으로 맞추기로 했다 (백엔드와 합의)."""
+    """날짜 형식은 우리 것(YY.MM.DD)으로 맞추기로 했다."""
     start = _date(trip.start_date)
     end = _date(trip.end_date)
 
@@ -133,14 +137,14 @@ def _to_preference_codes(preferences: object) -> tuple[list[str], list[str]]:
     detail_codes: list[str] = []
     for labels in mid.values():
         for label in labels if isinstance(labels, list) else []:
-            detail_codes.append(_code(label, "DETAIL"))
+            detail_codes.append(_code(label, "DETAIL"))  # 코드로 변환
 
     if not detail_codes:
         raise InputError("invalid_preference_mapping", "고른 중분류가 없습니다")
 
     travel_styles = [
         _code(label, "TRAVEL_STYLE") for label in preferences.get("travel_style") or []
-    ]
+    ]  # 코드로 변환
 
     return detail_codes, travel_styles
 
@@ -166,7 +170,7 @@ def to_candidates(contents: object) -> tuple[list[Candidate], list[Candidate]]:
     """
     if not isinstance(contents, list) or not contents:
         raise InputError("invalid_request", "contents 가 비었습니다")
-    if len(contents) > MAX_CONTENTS:
+    if len(contents) > MAX_CONTENTS:  # 최대 후보 개수 이상인지 체크
         raise InputError("invalid_request", f"contents 는 최대 {MAX_CONTENTS}개입니다")
 
     places: list[Candidate] = []
@@ -184,7 +188,7 @@ def to_candidates(contents: object) -> tuple[list[Candidate], list[Candidate]]:
         elif kind == "EVENT":
             events.append(_to_event(item))
         else:
-            raise InputError("invalid_request", f"모르는 content_type: {kind!r}")
+            raise InputError("invalid_request", f"잘못된 content_type: {kind!r}")
 
     return places, events
 
@@ -199,8 +203,8 @@ def _to_candidate(item: dict) -> Candidate:
         content_id=str(content_id),
         name=item.get("title") or "",
         # 중분류(HS01)가 취향 티어의 기준이고, 소분류(HS010100)는 이름 표시에 쓴다
-        category_code=item.get("classification_code_2") or "",
-        subcategory_code=item.get("classification_code_3") or "",
+        category_code=item.get("classification_code_2") or "",  # 중분류
+        subcategory_code=item.get("classification_code_3") or "",  # 소분류
         address=item.get("address") or "",
         lat=coordinates.get("lat"),
         lng=coordinates.get("lng"),
@@ -256,7 +260,7 @@ def _title(itinerary: Itinerary) -> str:
 
 def to_response(trip: TripRequest, itinerary: Itinerary) -> dict:
     """
-    계약서 7장의 result 모양으로 깎는다.
+    계약서 7장의 result 모양으로 만든다.
 
     장소 이름·주소·좌표·이미지는 **일정 목록에** 넣지 않는다 — 백엔드가 content_id 로
     자기 DB 에서 꺼내 쓰고, 우리가 또 보내면 '어느 쪽이 맞나'가 생긴다 (계약 7장).

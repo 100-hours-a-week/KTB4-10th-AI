@@ -32,6 +32,9 @@ from src.models import (
 PER_DAY_BY_STYLE = {"RELAXING": 3, "TIME_EFFICIENCY": 5}
 DEFAULT_PER_DAY = 4
 
+# 모델에 넘기는 장소 후보 = 자리 수 × 이 값. 이유는 find_places
+CANDIDATE_MULTIPLIER = 2
+
 
 # ============================================================
 # 1. prepare — 입력을 코드와 숫자로 바꾼다
@@ -125,15 +128,21 @@ def find_places(state: GraphState) -> dict:
 
     고른 것을 **전부** 담은 뒤에 넓힌다. 관심사를 둘 이상 골랐을 때 고른 적 없는
     중분류가 고른 중분류를 밀어내지 않게 하려는 것이다.
+
+    자리 수의 **2배**까지 담는다 (2026-10-06 사용자 결정). 자리만큼만 넘기면 모델은
+    고르지 못하고 배치만 한다. 3배부터는 고를 여지는 별로 안 늘고 목록만 길어진다.
+    단 관심 장소는 2배를 넘어도 전부 담는다 (2026-10-07 사용자 결정) — 자르면
+    content_id 순으로 앞쪽만 남아, 모델이 고르기도 전에 엔진이 임의로 버리게 된다.
     """
     wanted = set(state["wanted_lcls2"])
     wanted_families = set(state["wanted_families"])
-    needed = state["day_count"] * state["per_day"]
+    slots = state["day_count"] * state["per_day"]
+    needed = slots * CANDIDATE_MULTIPLIER
 
     pool = _place_pool(state)
 
     matched = [c for c in pool if c.category_code in wanted]
-    chosen = _take(matched, needed, "interest")
+    chosen = _take(matched, len(matched), "interest")
 
     if len(chosen) < needed:
         already = {c.content_id for c in chosen}
