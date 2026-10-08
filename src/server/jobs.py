@@ -75,6 +75,8 @@ async def stop(workers: list[asyncio.Task]) -> None:
 
 def fingerprint(payload: dict) -> str:
     """요청 본문의 지문. 같은 request_id 에 다른 내용이 왔는지 이것으로 가른다."""
+    # 요청 본문 전체를 64글자짜리 요약 문자열 하나로 바꾼다.
+    # 내용이 같으면 늘 같은 문자열. 한 글자라도 다르면 전혀 다른 문자열.
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -85,14 +87,14 @@ def existing(request_id: str, mark: str) -> dict | None:
 
     번호가 같은데 내용이 다르면 둘이 섞이지 않게 거절한다 (RequestIdConflict).
     """
-    job_id = request_map.get(request_id)
-    if job_id is None:
+    job_id = request_map.get(request_id)  # request_map으로 job_id와 request_id를 매핑
+    if job_id is None:  # 처음 보는 번호면 None 반환해서 계속 진행
         return None
 
-    job = jobs[job_id]
-    if job["fingerprint"] != mark:
-        raise RequestIdConflict
-
+    job = jobs[job_id]  # 작업 딕셔너리 jobs
+    if job["fingerprint"] != mark:  # 같은 request번호 + 요약 문자열이 다르면
+        raise RequestIdConflict  # 409
+    # 같은 번호 + 요약 문자열이 같음 → 기존 작업을 돌려줌 → 새로 안 만들고 202
     return job
 
 
@@ -120,18 +122,19 @@ def accept(
         "events": events,
         "fingerprint": mark,
         "request_id": request_id,
-        "request": request,
+        "request": request,  # 백엔드 요청 본문
         "accepted_at": datetime.now(calllog.KST),
     }
 
-    # 저장소에 먼저 넣는다. 큐에 먼저 넣으면 워커가 꺼냈을 때 아직 없을 수 있다.
+    # 저장소(jobs)에 먼저 넣는다. 큐에 먼저 넣으면 워커가 꺼냈을 때 저장소에 아직 없을 수 있다.
     jobs[job["job_id"]] = job
     try:
         job_queue.put_nowait(job["job_id"])
-    except asyncio.QueueFull:
+    except asyncio.QueueFull:  # 큐가 꽉 차면 저장소에서 다시 지우고 QueueFull을 올린다.
         del jobs[job["job_id"]]
         raise
 
+    # 큐에 넣는 것에 성공하면 request_map 에 job_id 를 적는다.
     request_map[request_id] = job["job_id"]
     return job
 
@@ -153,28 +156,36 @@ def public(job: dict) -> dict:
 
 async def worker() -> None:
     """큐에서 하나 꺼내 일정을 만들고, 성공이든 실패든 작업에 적는다."""
+    # 무한 루프 : 큐에서 job_id 하나 꺼냄 -> _process -> task_done()
+    # 동시에 최대 MAX_CONCURRENCY건.
     while True:
-        job_id = await job_queue.get()
+        job_id = await job_queue.get()  # queue에서 job_id를 하나 꺼낸다.
         try:
             await _process(jobs[job_id])
         finally:
             job_queue.task_done()
+        # 성공이든 예외든 반드시 "하나 끝났다"를 알려야
+        # stop()의 job_queue.join()이 영원히 기다리지 않는다.
 
 
 async def _process(job: dict) -> None:
-    job["status"] = "processing"
+    job["status"] = "processing"  # 상태를 processing으로
+
+    # 후처리 시간 재기 시작 준비
     metrics.start_job_timing()
     # 이 작업의 LLM 기록 파일 이름을 받을 상자. 워커마다 제 문맥이라 작업끼리 섞이지 않고,
     # to_thread 로 넘긴 실도 같은 상자를 본다 (calllog._CURRENT_RUN 설명 참고)
     calllog.start_run()
     started = time.monotonic()
+
     # _succeed 도 try 안에 둔다. else 에 두면 그 안의 예외(응답 만들기·HTML 그리기)는
     # 아래 except 들이 못 잡고 worker() 의 루프를 끊는다 — 워커가 조용히 하나씩 사라진다
+    # JOB_TIMEOUT 동안 기다림
     try:
         itinerary = await asyncio.wait_for(_generate(job), JOB_TIMEOUT)
         _succeed(job, itinerary)
     except asyncio.TimeoutError:
-        # 실은 계속 돌고 있다. wait_for 는 스레드를 죽이지 못한다 —
+        # 스레드는 계속 돌고 있다. wait_for 는 스레드를 죽이지 못한다
         # 그래서 LLM 쪽 최악 소요(재시도 포함)를 JOB_TIMEOUT 보다 짧게 잡아 뒀다
         # (llm_plan.CLAUDE_TIMEOUT).
         _fail(
@@ -188,7 +199,7 @@ async def _process(job: dict) -> None:
         # 예상 못 한 오류. 원인을 찾으려면 어디서 났는지가 필요하다
         detail = "".join(traceback.format_exception(exc))
         _fail(job, "generation_failed", str(exc), "application_exception", detail)
-    finally:
+    finally:  # 작업 시간을 /metrics 에 기록
         metrics.JOB_DURATION.observe(time.monotonic() - started)
 
     _save_generation(job)
@@ -227,8 +238,9 @@ def _save_generation(job: dict) -> None:
 
 async def _generate(job: dict) -> Itinerary:
     """
-    graph.run 은 동기 함수다. 그대로 부르면 그 1분 동안 이벤트 루프가 멈춰
-    워커 셋이 전부 선다 — 다른 실로 넘긴다.
+    graph.run 은 동기 함수다. 이벤트 루프에서 그대로 부르면 그동안 서버 전체가 멈춘다.
+    (다른 워커,접수,조회 모두)
+    따라서 asyncio.to_thread로 별도 스레드로 넘겨서 이벤트 루프는 그동안 다른 일을 한다.
     """
     return await asyncio.to_thread(
         graph.run, job["trip"], places=job["places"], events=job["events"]
@@ -240,6 +252,7 @@ def _succeed(job: dict, itinerary: Itinerary) -> None:
     빈 일정은 여기까지 오지 않는다 — 후보가 일수보다 적으면 nodes.plan 이,
     빈 날이 있으면 llm_plan 의 검사가 먼저 멈춘다.
     """
+    # 계약 형식대로 모양을 만들어 result에 넣는다.
     job.update(status="completed", result=adapter.to_response(job["trip"], itinerary))
     metrics.observe_post_processing()
     metrics.JOBS_TOTAL.labels(result="success").inc()

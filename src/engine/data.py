@@ -97,8 +97,8 @@ def find_region_codes(province: str, city: str | None) -> tuple[str, str | None]
             f"'{province}' 를 찾지 못했습니다. 후보: " + ", ".join(sorted(provinces))
         )
 
-    if not city:
-        return entry["code"], None
+    if not city:  # city 가 없을 경우
+        return entry["code"], None  # lDongRegnCd 랑 None 반환
 
     sigungu_code = entry["cities"].get(city)
     if sigungu_code is None:
@@ -107,7 +107,7 @@ def find_region_codes(province: str, city: str | None) -> tuple[str, str | None]
             + ", ".join(sorted(entry["cities"]))
         )
 
-    return entry["code"], sigungu_code
+    return entry["code"], sigungu_code  # lDongRegnCd 랑 lDongSignguCd
 
 
 @lru_cache(maxsize=1)
@@ -203,6 +203,6 @@ def preference_code(label: str, preference_type: str) -> str | None:
     화면에 쓰는 것이 아니라 취향 티어의 기준이라, 틀린 채로 흘러가면 조용히
     엉뚱한 일정이 나온다. 부르는 쪽이 거절해야 한다.
     """
-    if not PREFERENCE_ENUM_PATH.exists():
+    if not PREFERENCE_ENUM_PATH.exists():  # ENUM 표 없음
         raise DataError(f"{PREFERENCE_ENUM_PATH} 가 없습니다.")
     return _preference_codes().get((preference_type, label))
