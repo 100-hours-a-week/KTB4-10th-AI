@@ -24,6 +24,11 @@ PREFERENCE_ENUM_PATH = REPO_ROOT / "data" / "user_category_enum.csv"
 # EV(행사)를 빼는 게 중요하다 — 안 빼면 같은 항목이 장소로 한 번, 행사로 한 번 나온다.
 PLACE_THEMES = frozenset({"NA", "EX", "HS", "LS", "VE"})
 
+# 넓은 지역 전체에 붙은 지정 이름이라 일정의 '한 곳'이 될 수 없는 장소.
+# 제주도 국가지질공원은 섬 전체 지정인데 주소는 한 지점이고, 그 지점은
+# '제주 세계자연유산센터'(별도 장소)로 이미 들어온다 (10-07 사례)
+EXCLUDED_PLACE_IDS = frozenset({"1162240"})
+
 # user_category_enum.csv 의 DETAIL 코드 -> TourAPI lclsSystm2. 두 체계가 1:1로 붙는다.
 # VE만 구멍이 있다: VE05·VE06·VE08~VE12가 어느 DETAIL에도 안 붙어
 # 취향 일치로는 안 잡히고 채우기 경로로만 들어온다. VE03 은 아래 EXTRA_LCLS2 로 붙였다.
