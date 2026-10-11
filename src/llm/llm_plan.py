@@ -38,14 +38,16 @@ from src.models import Candidate, DayDraft, DayPlanDraft, PlanDraftItem, TripReq
 from src.paths import REPO_ROOT
 
 DEFAULT_MODEL = "claude-sonnet-5"
-MAX_TOKENS = 16000
+# 생각 포함. 최악 조합(종로구 관심 장소 177곳 · 7일 35곳)이 16000 중 15586 을 써서
+# 올렸다 (2026-10-11). 한도는 상한일 뿐이라 쓰지 않으면 비용이 늘지 않는다
+MAX_TOKENS = 20000
 EFFORT = "medium"  # 기본값은 high. 일정 배치가 무거운 일이 아니라 낮춰서 시작한다
 
 # Claude SDK 호출 한 건의 상한. SDK 는 **시간 초과도 재시도**하므로 시간 초과가 두 번
 # 이어지면 140 × 2 + 재시도 대기(이때는 8초 이하) = 288초다. 이 값이 서버의 작업 타임아웃
 # (jobs.JOB_TIMEOUT 300초)보다 짧아야 작업이 실패로 접힌 뒤 실이 혼자 계속 돌지 않는다.
 # 다만 서버가 429·5xx 에 retry-after 를 붙이면 SDK 는 그만큼 상한 없이 기다려 300초를
-# 넘을 수 있다 (드묾). 실측 호출은 8.5~57.5초라 정상 응답을 끊을 일은 거의 없다.
+# 넘을 수 있다 (드묾).
 CLAUDE_TIMEOUT = 140
 CLAUDE_MAX_RETRIES = 1
 
@@ -66,6 +68,7 @@ class LLMError(RuntimeError):
         call       — 호출 실패 (한도 · 네트워크 · API 오류 · 거부)
         timeout    — 호출이 CLAUDE_TIMEOUT 을 넘었다
         parse      — 응답이 DayPlanDraft 모양이 아니다
+        truncated  — 출력이 MAX_TOKENS 에서 잘렸다 (생각 중이든 답을 쓰던 중이든)
         validation — 모양은 맞는데 규칙을 어겼다 (_validate_all · _validate_days)
         fake       — 가짜 모드에서 가짜가 실패했다
     """
@@ -510,12 +513,21 @@ def claude_call(client, model: str, payload: str):
         ) from exc
     # SDK 가 응답 글자를 DayPlanDraft 로 읽다 실패했다 (깨진 JSON · 칸 누락 · 잘린 응답)
     except pydantic.ValidationError as exc:
+        # 답을 쓰다 MAX_TOKENS 에 닿으면 JSON 이 중간에 끊겨 'EOF while parsing' 이 된다.
+        # SDK 가 해석부터 하고 던져서 stop_reason 을 볼 수 없다
+        if "EOF while parsing" in str(exc):
+            raise LLMError(
+                f"출력이 {MAX_TOKENS} 토큰에서 잘렸습니다", kind="truncated"
+            ) from exc
         raise LLMError(f"응답 파싱 실패: {exc}", kind="parse") from exc
     except anthropic.APIConnectionError as exc:
         raise LLMError(f"네트워크 실패: {exc}") from exc
     except anthropic.APIStatusError as exc:
         raise LLMError(f"API 오류 {exc.status_code}: {exc.message}") from exc
 
+    # 생각만 하다 MAX_TOKENS 에 닿으면 답 칸이 비어 SDK 가 오류 없이 돌려준다
+    if response.stop_reason == "max_tokens":
+        raise LLMError(f"출력이 {MAX_TOKENS} 토큰에서 잘렸습니다", kind="truncated")
     if response.stop_reason == "refusal":
         raise LLMError(f"모델이 거부했습니다: {response.stop_details}")
 
