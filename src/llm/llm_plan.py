@@ -301,7 +301,8 @@ def _validate_all(
     if duplicated:
         raise LLMError(f"같은 곳을 두 번 배치했습니다: {duplicated}")
 
-    # 후보가 자리보다 적은 시군구가 32곳 있다 (화성시 효행구는 장소가 2곳뿐).
+    # 후보가 자리보다 적은 시군구가 있다 — 최대 35자리(7일 × 하루 5곳) 기준 230곳 중 44곳,
+    # 가장 적은 부산 연제구는 장소 8곳 (2026-10-11 덤프, 사진 없는 곳을 뺀 수).
     # 그런 데서는 다 넣어도 자리가 남으므로, 기대치는 둘 중 작은 쪽이다.
     expected = min(day_count * per_day, len(candidates))
     if len(items) != expected:
