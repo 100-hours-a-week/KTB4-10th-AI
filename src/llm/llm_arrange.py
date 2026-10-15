@@ -10,7 +10,7 @@ src/llm/llm_arrange.py
 처음부터 없던 기능이다 (docs/archive/claude-260928/plan/llm-plan-only.md).
 
 Claude 를 부르는 부품(설정 · LLMError · call_and_record)은 llm_client 에 있다.
-2026-10-15 까지 이 파일 이름은 llm_arrange.py 였다 (#35).
+2026-10-15 까지 이 파일 이름은 llm_plan.py 였다 (#35).
 
 **arrange_all 은 기본으로 Claude 를 부른다.** 모델은 LLM_MODEL (비우면 claude-sonnet-5).
 LLM_MODE=fake 일 때만 Claude 를 부르는 자리를 가짜(src/llm/fake_llm.py)가 대신한다 —
@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import collections
 import json
-import os
 import re
 import time
 from datetime import date, timedelta
@@ -115,11 +114,7 @@ def arrange_all(
             payload = _candidates_to_payload(
                 candidates, start, day_count, per_day, conditions
             )
-            model = (
-                os.environ.get(llm_client.MODEL_VAR, "").strip()
-                or llm_client.DEFAULT_MODEL
-            )
-            draft = _claude_arrange_all(model, payload, trip)
+            draft = _claude_arrange_all(llm_client.model_name(), payload, trip)
     except LLMError as exc:
         exc.stage = "arrange"
         raise

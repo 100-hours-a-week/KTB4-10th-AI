@@ -4,7 +4,7 @@ src/llm/llm_client.py
 **Claude 를 부르는 공통 부품.** 배치(llm_arrange)와 글쓰기(llm_write)가 같이 쓴다 —
 설정 · LLMError · 모드(real/fake) · 키 읽기 · SDK 호출 · 호출 기록.
 
-2026-10-15 에 llm_arrange.py 에서 떼어 냈다 (#35). 배치와 글쓰기로 나뉘자, 글쓰기가 배치
+2026-10-15 에 llm_plan.py 에서 떼어 냈다 (#35). 배치와 글쓰기로 나뉘자, 글쓰기가 배치
 파일에서 호출 부품을 가져다 쓰는 모양이 되어서다. 지시문·입력·검사는 단계마다 제 파일에 있다.
 """
 
@@ -31,6 +31,11 @@ ANTHROPIC_KEY_VAR = "ANTHROPIC_API_KEY"
 # real (비워 둬도 real) · fake. 인프라에 알려 준 이름이라 바꾸면 클라우드팀에도 알린다
 MODE_VAR = "LLM_MODE"
 MODES = ("real", "fake")
+
+
+def model_name() -> str:
+    """부를 모델. LLM_MODEL 이 비면 DEFAULT_MODEL."""
+    return os.environ.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
 
 
 class LLMError(RuntimeError):

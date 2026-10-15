@@ -17,7 +17,6 @@ Claude 를 부르고 기록하는 부품(call_and_record · LLMError)은 llm_cli
 from __future__ import annotations
 
 import json
-import os
 import time
 from datetime import date, timedelta
 
@@ -96,11 +95,7 @@ def write_all(
             )
         else:
             payload = _plan_to_payload(plan, candidates, start, day_count, conditions)
-            model = (
-                os.environ.get(llm_client.MODEL_VAR, "").strip()
-                or llm_client.DEFAULT_MODEL
-            )
-            draft = _claude_write_all(model, payload, trip)
+            draft = _claude_write_all(llm_client.model_name(), payload, trip)
     except LLMError as exc:
         exc.stage = "write"
         raise
