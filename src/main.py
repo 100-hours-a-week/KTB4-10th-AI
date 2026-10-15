@@ -29,14 +29,14 @@ from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src import logs, metrics
-from src.llm import calllog, fake_llm, llm_plan
+from src.llm import calllog, fake_llm, llm_client
 from src.server import adapter, jobs
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 설정이 틀렸으면 첫 요청에서야 실패한다. 켜기 전에 막는다
-    mode = llm_plan.llm_mode()  # real or fake
+    mode = llm_client.llm_mode()  # real or fake
     save = calllog.save_mode()  # True or False (ON or OFF)
     if mode == "fake":
         # 운영 서버에서 부하 테스트를 한다. 가짜로 켜진 걸 모르고 지나가면 안 된다
@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
             delay_sec=fake_llm.delay_seconds(),
         )
     else:
-        llm_plan.load_api_key(llm_plan.ANTHROPIC_KEY_VAR)
+        llm_client.load_api_key(llm_client.ANTHROPIC_KEY_VAR)
     metrics.LLM_MODE.labels(llm_mode=mode).set(1)
 
     # 기록이 켜졌는지는 여기서 본다 (서버는 OFF 여야 한다)
@@ -142,7 +142,7 @@ async def health() -> dict:
     """
     return {
         "status": "ok",
-        "llm_mode": llm_plan.llm_mode(),
+        "llm_mode": llm_client.llm_mode(),
         "jobs": len(jobs.jobs),
         "queue_size": jobs.job_queue.qsize(),
         "running": jobs.running_count(),

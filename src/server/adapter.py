@@ -209,6 +209,8 @@ def _to_candidate(item: dict) -> Candidate:
         lat=coordinates.get("lat"),
         lng=coordinates.get("lng"),
         image_url=item.get("image_url"),
+        # 필드 이름은 백엔드와 아직 안 맞췄다 (#35). 없어도 생성은 된다
+        overview=item.get("overview") or "",
     )
 
 
