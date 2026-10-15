@@ -85,9 +85,17 @@ def _place_pool(state: GraphState) -> list[Candidate]:
 
     끼니(FD)·숙박(AC)·쇼핑(SH)·추천코스(C01)와 행사(EV)는 여기서 뺀다. 행사를 안 빼면
     같은 항목이 장소로 한 번, 행사로 한 번 들어온다. 바깥을 믿을 수 없어 여기서 거른다.
+    지역 전체 지정명(data.EXCLUDED_PLACE_IDS)도 뺀다.
+    사진 없는 장소도 뺀다 — 가이드북이 장소마다 사진 한 쪽을 쓴다 (#28, 사용자 결정).
     """
     given = state["given_places"]
-    pool = [c for c in given if c.category_code[:2] in data.PLACE_THEMES]
+    pool = [
+        c
+        for c in given
+        if c.category_code[:2] in data.PLACE_THEMES
+        and c.content_id not in data.EXCLUDED_PLACE_IDS
+        and c.image_url
+    ]
 
     # content_id 순 — 같은 입력이면 같은 결과가 나오게
     return sorted(pool, key=lambda candidate: candidate.content_id)
@@ -96,7 +104,7 @@ def _place_pool(state: GraphState) -> list[Candidate]:
 def _event_pool(state: GraphState) -> list[Candidate]:
     """
     행사 후보. 장소와 같은 방식이되 **여행 기간과 겹치는 것만** 남긴다.
-    지난 행사가 섞여 오면 열리지 않는 날에 배정된다.
+    지난 행사가 섞여 오면 열리지 않는 날에 배정된다. 사진 없는 행사도 뺀다 (장소와 같은 이유).
 
     **복사해서** 쓴다. 바로 아래에서 pick 을 고치는데, 부르는 쪽이 넘긴 객체를 우리가
     바꿔 놓으면 그쪽에서 원인을 찾을 수 없다 — 서버라면 다음 요청에 남는다.
@@ -111,6 +119,7 @@ def _event_pool(state: GraphState) -> list[Candidate]:
         for candidate in pool
         if (candidate.event_start_date or "") <= end
         and (candidate.event_end_date or "") >= start
+        and candidate.image_url
     ]
 
 
