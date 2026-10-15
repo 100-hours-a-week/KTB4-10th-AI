@@ -55,11 +55,17 @@ class Candidate(BaseModel):
     event_start_date: Optional[str] = None
     event_end_date: Optional[str] = None
 
+    # 장소 소개글. 백엔드가 보낸다. 글쓰기(write)에만 넣고 배치(arrange)에는 넣지 않는다 —
+    # 후보 전부에 붙이면 입력이 몇 배가 된다. 없는 곳도 있어 비어도 된다
+    overview: str = ""
+
 
 class PlanItem(BaseModel):
     """
-    LLM의 출력 한 줄. 이름·주소·좌표는 받지 않는다 — 우리가 이미 갖고 있고,
+    배치 한 줄. 이름·주소·좌표는 받지 않는다 — 우리가 이미 갖고 있고,
     받으면 '어느 쪽이 맞나'라는 판단이 생긴다.
+
+    추천 이유는 여기 없다 — 글쓰기(write)가 따로 쓰고 build 가 content_id 로 붙인다.
     """
 
     content_id: str
@@ -67,7 +73,6 @@ class PlanItem(BaseModel):
     order: int  # 그날 안에서 1부터
     start_time: str  # HH:MM
     duration_minutes: int
-    reason: str
 
 
 class PlanDraftItem(BaseModel):
@@ -85,7 +90,6 @@ class PlanDraftItem(BaseModel):
     day: int  # 1부터
     start_time: str  # HH:MM
     duration_minutes: int
-    reason: str
 
 
 class DayDraft(BaseModel):
@@ -100,22 +104,38 @@ class DayDraft(BaseModel):
 
 class DayPlanDraft(BaseModel):
     """
-    모델 응답의 겉껍데기.
+    배치(arrange) 응답의 겉껍데기.
 
     구조화 출력에 넘길 스키마라 최상위가 객체여야 해서 한 겹 감쌌다.
     PlanDraftItem 이 content_id 만 받도록 돼 있으므로, "사실 데이터는 모델을 거치지
     않는다"는 규칙이 프롬프트가 아니라 **스키마로** 강제된다.
 
-    title·intro·days 는 2026-09-27 에 더했다. 전에는 서버가 지역·일수로 문구를
-    조합했는데, 계약서가 요구하는 것(7장)은 편집된 제목과 소개 문장이다.
-    **기본값을 두지 않는다** — 모델이 빠뜨리면 조용히 빈 값이 나가는 것보다
-    스키마 검증에서 멈추는 편이 낫다.
+    제목·소개·하루 요약은 2026-10-15 에 WriterDraft 로 옮겼다 (#35).
+    """
+
+    items: list[PlanDraftItem]
+
+
+class Reason(BaseModel):
+    """장소 하나의 추천 이유. 이름은 자체 모델 학습 데이터(v7)의 스키마와 같게 둔다."""
+
+    content_id: str
+    reason: str
+
+
+class WriterDraft(BaseModel):
+    """
+    글쓰기(write) 응답. 배치가 끝난 일정을 받아 문구만 쓴다.
+
+    모양을 자체 모델 학습 데이터(samples/open_model/label_inputs_v7.jsonl)의 출력과
+    같게 둔다 — write 를 자체 모델로 바꿀 때 받는 쪽을 고치지 않으려고.
+    기본값이 없는 이유는 빠뜨린 칸이 빈 값으로 나가지 않고 검증에서 멈추게 하려는 것.
     """
 
     title: str  # 가이드북 제목. 계약 상한 15자
     intro: str  # 여행 하나를 한 문장으로. 계약의 result.summary 자리
     days: list[DayDraft]
-    items: list[PlanDraftItem]
+    reasons: list[Reason]
 
 
 class Coordinates(BaseModel):
@@ -226,10 +246,13 @@ class GraphState(TypedDict, total=False):
     places: list[Candidate]
     events: list[Candidate]
 
-    # plan — 모델이 쓴 가이드북 문구도 여기서 build 로 넘어간다
+    # arrange
     plan: list[PlanItem]
+
+    # write — 모델이 쓴 가이드북 문구. build 가 plan 과 content_id 로 잇는다
     title: str
     intro: str
     day_summaries: dict[int, str]  # 일차 → 그날 요약
+    reasons: dict[str, str]  # content_id → 추천 이유
 
     result: Itinerary  # build

@@ -1,16 +1,17 @@
 """
 src/llm/llm_plan.py
 
-**일정을 짜는 모델 호출.** 후보를 전부 넘기고, 무엇을 고를지·어느 날에 둘지·몇 시에
-갈지까지 모델이 정한다.
+**일정을 배치하는 모델 호출 (arrange).** 후보를 전부 넘기고, 무엇을 고를지·어느 날에
+둘지·몇 시에 갈지까지 모델이 정한다. 문구(제목·소개·하루 요약·추천 이유)는 쓰지 않는다 —
+배치가 끝난 뒤 src/llm/llm_write.py 가 고른 곳의 overview 를 보고 쓴다 (2026-10-15, #35).
 
 2026-09-27 까지는 코드가 날짜를 묶고 모델은 하루 안의 순서만 정하는 경로(llm.plan_days)와
 나란히 있었다. 그 경로를 지우면서 같은 자리 합치기·붙이기도 함께 버렸다 — 이 경로에는
 처음부터 없던 기능이다 (docs/archive/claude-260928/plan/llm-plan-only.md).
 
-모델을 부르는 일은 전부 이 파일에 있다 — 설정·키 읽기·SDK 호출·프롬프트·페이로드·검사.
-2026-09-28 에 부품 파일(py)을 합쳤다. Gemini 호출을 지우자 Claude 호출 부품만 남아
-따로 둘 이유가 없어졌다.
+설정·키 읽기·SDK 호출·기록 부품(call_and_record · claude_call · LLMError)도 여기 있고
+llm_write 가 가져다 쓴다. 2026-09-28 에 부품 파일(py)을 합쳤다. Gemini 호출을 지우자
+Claude 호출 부품만 남아 따로 둘 이유가 없어졌다.
 
 **plan_all 은 기본으로 Claude 를 부른다.** 모델은 LLM_MODEL (비우면 claude-sonnet-5).
 LLM_MODE=fake 일 때만 Claude 를 부르는 자리를 가짜(src/llm/fake_llm.py)가 대신한다 —
@@ -34,7 +35,7 @@ from datetime import date, timedelta
 from src import dates, logs, metrics
 from src.engine import data
 from src.llm import calllog, fake_llm
-from src.models import Candidate, DayDraft, DayPlanDraft, PlanDraftItem, TripRequest
+from src.models import Candidate, DayPlanDraft, PlanDraftItem, TripRequest
 from src.paths import REPO_ROOT
 
 DEFAULT_MODEL = "claude-sonnet-5"
@@ -43,10 +44,11 @@ DEFAULT_MODEL = "claude-sonnet-5"
 MAX_TOKENS = 20000
 EFFORT = "medium"  # 기본값은 high. 일정 배치가 무거운 일이 아니라 낮춰서 시작한다
 
-# Claude SDK 호출 한 건의 상한. SDK 는 **시간 초과도 재시도**하므로 시간 초과가 두 번
-# 이어지면 140 × 2 + 재시도 대기(이때는 8초 이하) = 288초다. 이 값이 서버의 작업 타임아웃
-# (jobs.JOB_TIMEOUT 300초)보다 짧아야 작업이 실패로 접힌 뒤 실이 혼자 계속 돌지 않는다.
-# 다만 서버가 429·5xx 에 retry-after 를 붙이면 SDK 는 그만큼 상한 없이 기다려 300초를
+# 배치 호출 한 건의 상한. SDK 는 **시간 초과도 재시도**하므로 시간 초과가 두 번
+# 이어지면 140 × 2 + 재시도 대기(이때는 8초 이하) = 288초다. 여기에 글쓰기 호출의 최악
+# (llm_write.WRITE_TIMEOUT)을 더한 값이 서버의 작업 타임아웃(jobs.JOB_TIMEOUT)보다 짧아야
+# 작업이 실패로 접힌 뒤 실이 혼자 계속 돌지 않는다.
+# 다만 서버가 429·5xx 에 retry-after 를 붙이면 SDK 는 그만큼 상한 없이 기다려 작업 상한을
 # 넘을 수 있다 (드묾).
 CLAUDE_TIMEOUT = 140
 CLAUDE_MAX_RETRIES = 1
@@ -66,16 +68,20 @@ class LLMError(RuntimeError):
 
     kind 는 로그와 /metrics 에서 원인을 가르는 이름이다. 계약 응답의 코드와는 무관하다.
         call       — 호출 실패 (한도 · 네트워크 · API 오류 · 거부)
-        timeout    — 호출이 CLAUDE_TIMEOUT 을 넘었다
-        parse      — 응답이 DayPlanDraft 모양이 아니다
+        timeout    — 호출이 시간 상한을 넘었다
+        parse      — 응답이 DayPlanDraft · WriterDraft 모양이 아니다
         truncated  — 출력이 MAX_TOKENS 에서 잘렸다 (생각 중이든 답을 쓰던 중이든)
-        validation — 모양은 맞는데 규칙을 어겼다 (_validate_all · _validate_days)
+        validation — 모양은 맞는데 규칙을 어겼다 (_validate_all · llm_write 의 검사)
         fake       — 가짜 모드에서 가짜가 실패했다
+
+    stage 는 어느 단계에서 났나 ("arrange" · "write"). 어느 단계가 자주 틀리는지 재려고
+    실패 이름을 llm_arrange_validation 처럼 가른다 (#35).
     """
 
-    def __init__(self, message: str, kind: str = "call"):
+    def __init__(self, message: str, kind: str = "call", stage: str = ""):
         super().__init__(message)
         self.kind = kind
+        self.stage = stage
 
 
 def llm_mode() -> str:
@@ -107,7 +113,7 @@ FIT_LABELS = {"interest": "관심사", "related": "비슷한 분류", "filler": 
 SYSTEM_PROMPT = """당신은 여행 일정을 짜는 도우미입니다.
 
 여행 조건(trip), 여행 날짜(days), 후보(candidates)를 받습니다. 후보 중에서 골라
-날짜와 시각을 정하고, 추천 이유와 가이드북 문구를 씁니다.
+날짜와 시각을 정합니다. 추천 이유와 가이드북 문구는 다음 단계에서 따로 씁니다.
 
 배치 규칙:
 1. **정확히 total_to_place 개**를 배치합니다. 하루 최대 per_day 개이고,
@@ -130,30 +136,7 @@ SYSTEM_PROMPT = """당신은 여행 일정을 짜는 도우미입니다.
 - 운영 시각은 입력에 없습니다. 이름으로 보아 실내 관람 시설(박물관·미술관·전시관·기념관 등)이나
   전시 행사는 늦게 가면 닫혀 있을 수 있으니 **17:00 전에 끝나게** 둡니다.
   17:00 이후는 야외 명소·산책로·야경처럼 시간 제약이 적은 곳에 씁니다.
-
-사실 — 아래 문구 전체에 적용:
-- **입력에 있는 사실(이름·분류·주소·행사 기간)만 씁니다.** 입력에 없는 것은 쓰지 마세요. 예:
-  역사적 사건, 문화재 지정·번호, 운영·공연 시각, 요금, 해 지는 시각(노을·일몰·석양),
-  분위기·풍경(조용한·한적한·운치 있는·맑은 바다), 평판(대표적인·유명한).
-- 행사 기간은 입력의 날짜와, 아침·점심·저녁 같은 시간대 말은 그 장소의 start_time 과 맞게 씁니다.
-- 위치는 주소에 적힌 만큼만 씁니다. '같은 동네'·'같은 길'은 두 주소에 같은 읍·면·동이나
-  도로 이름이 실제로 있을 때만 씁니다. 거리·해안·산간 같은 말과 '이동 없이' 같은 과장은 쓰지 마세요.
-
-문구:
-- 모든 문구(reason·intro·summary)는 '~합니다'체로 씁니다.
-- reason — **두 문장, 100~150자.**
-  첫 문장은 왜 이곳인지 — fit 이 "관심사"면 trip 의 관심사와, 아니면 동행·여행 스타일·인원과
-  이어서 씁니다. 장소는 이름·분류에서 드러나는 만큼만,
-  여행 스타일은 일정의 짜임(넉넉한 시간, 이어지는 순서)으로 잇습니다.
-  둘째 문장은 왜 이 순서인지 — 앞뒤 장소와 같은 동네면 그 동선을,
-  아니면 그날 몇 번째로 무엇 다음에 들르는지 씁니다.
-  같은 문장을 돌려 쓰지 마세요.
-- title — **15자 이내.** 지역과 여행의 성격이 드러나게 (예: "경주 역사 여행").
-  날짜·일수는 넣지 마세요 — 표지에 따로 적힙니다.
-- intro — 여행을 소개하는 한 문장.
-- days — days 의 **모든 day 번호마다 하나씩.** summary 는 100~300자로,
-  그날 도는 순서(장소 이름과 오전·오후)와 각 곳이 trip 의 관심사·동행과 어떻게 이어지는지,
-  같은 동네로 묶인 곳이 있으면 그 묶음을 씁니다."""
+"""
 
 
 # ============================================================
@@ -171,10 +154,10 @@ def plan_all(
     trip: TripRequest,
 ) -> DayPlanDraft:
     """
-    후보 전부를 넘기고 날짜·순서·시각과 가이드북 문구(제목·소개·하루 요약)를 받는다.
+    **배치(arrange).** 후보 전부를 넘기고 날짜·시각을 받는다. 문구는 받지 않는다.
 
     conditions 는 모델에게 보내는 여행 조건(지역·인원·취향 라벨)이고, trip(TripRequest)은
-    모델에게 보내지 않는 **기록용**이다. 라벨로 바꾸는 일은 부르는 쪽(nodes.plan)이 한다 —
+    모델에게 보내지 않는 **기록용**이다. 라벨로 바꾸는 일은 부르는 쪽(nodes.arrange)이 한다 —
     코드표는 engine 에 있고, 여기서 engine 을 부르면 engine ↔ llm 폴더 순환이 된다.
     """
     mode = llm_mode()
@@ -188,19 +171,18 @@ def plan_all(
             )
             model = os.environ.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
             draft = _claude_plan_all(model, payload, trip)
+    except LLMError as exc:
+        exc.stage = "arrange"
+        raise
     finally:
         # 실패한 호출도 잰다. 시간 초과로 끝난 호출이 가장 알고 싶은 값이다
         elapsed = time.monotonic() - started
         metrics.LLM_CALL_DURATION.labels(llm_mode=mode).observe(elapsed)
 
-    # 검사부터가 후처리다 (클라우드팀 합의: 응답 검사 · 응답 조립 · HTML 생성)
-    metrics.mark_llm_done()
-
     try:
         _validate_all(draft.items, candidates, start, day_count, per_day)
-        _validate_days(draft.days, day_count)
     except LLMError as exc:
-        raise LLMError(str(exc), kind="validation") from exc
+        raise LLMError(str(exc), kind="validation", stage="arrange") from exc
     return draft
 
 
@@ -214,6 +196,27 @@ def _iso(yyyymmdd: str | None) -> str | None:
     if not yyyymmdd or len(yyyymmdd) != 8:
         return None
     return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
+
+
+def candidate_entry(candidate: Candidate) -> dict:
+    """후보 한 곳을 모델에게 보일 모양으로. 배치와 글쓰기(llm_write)가 같이 쓴다."""
+    entry = {
+        "content_id": candidate.content_id,
+        "name": candidate.name,
+        # 코드('HS01')는 모델이 읽지 못해 이름에서 짐작한다. 소분류까지 주면
+        # 덕수궁과 숭례문처럼 같은 중분류('역사유적지')도 갈린다
+        "category": data.category_path(
+            candidate.category_code, candidate.subcategory_code
+        ),
+        "address": candidate.address,
+        "kind": "행사" if candidate.pick == "event" else "장소",
+    }
+    if candidate.pick == "event":
+        entry["event_start_date"] = _iso(candidate.event_start_date)
+        entry["event_end_date"] = _iso(candidate.event_end_date)
+    else:
+        entry["fit"] = FIT_LABELS[candidate.pick]
+    return entry
 
 
 def _candidates_to_payload(
@@ -241,25 +244,7 @@ def _candidates_to_payload(
         for index in range(day_count)
     ]
 
-    listed = []
-    for candidate in candidates:
-        entry = {
-            "content_id": candidate.content_id,
-            "name": candidate.name,
-            # 코드('HS01')는 모델이 읽지 못해 이름에서 짐작한다. 소분류까지 주면
-            # 덕수궁과 숭례문처럼 같은 중분류('역사유적지')도 갈린다
-            "category": data.category_path(
-                candidate.category_code, candidate.subcategory_code
-            ),
-            "address": candidate.address,
-            "kind": "행사" if candidate.pick == "event" else "장소",
-        }
-        if candidate.pick == "event":
-            entry["event_start_date"] = _iso(candidate.event_start_date)
-            entry["event_end_date"] = _iso(candidate.event_end_date)
-        else:
-            entry["fit"] = FIT_LABELS[candidate.pick]
-        listed.append(entry)
+    listed = [candidate_entry(candidate) for candidate in candidates]
 
     # 합계를 코드가 넣어 준다. days 길이 × per_day 를 모델이 곱하게 두면 개수를 놓친다
     # (2026-09-25 전북에서 25개 중 15·12개만 왔다).
@@ -341,7 +326,7 @@ def _validate_all(
         of_day = [item for item in items if item.day == day]
 
         # 빈 날이 있으면 응답에서 그 날짜가 빠진다 (계약 7장 위반). 후보가 일수보다
-        # 적은 경우는 nodes.plan 이 모델을 부르기 전에 걸러 낸다
+        # 적은 경우는 nodes.arrange 가 모델을 부르기 전에 걸러 낸다
         if not of_day:
             raise LLMError(f"{day}일차가 비었습니다 (모든 날에 한 곳 이상)")
 
@@ -355,21 +340,6 @@ def _validate_all(
             raise LLMError(
                 f"{day}일차에 행사가 {event_count}건입니다 (최대 {MAX_EVENTS_PER_DAY}건)"
             )
-
-
-def _validate_days(days: list[DayDraft], day_count: int) -> None:
-    """
-    하루 요약이 1~day_count 일차를 **한 번씩** 담았나.
-
-    빠지거나 겹치면 가이드북 일차 지면이 비거나 엉뚱한 날에 붙는다. 제목 길이는 여기서
-    보지 않는다 — 넘치면 서버가 자른다 (사실 오류가 아니라 작업을 멈출 일이 아니다).
-    """
-    returned = sorted(day.day for day in days)
-    expected = list(range(1, day_count + 1))
-    if returned != expected:
-        raise LLMError(
-            f"하루 요약의 일차가 {returned} 입니다 (1~{day_count} 일차가 한 번씩이어야 함)"
-        )
 
 
 def _fake_plan_all(
@@ -410,22 +380,42 @@ def _fake_plan_all(
 
 def _claude_plan_all(model: str, payload: str, trip: TripRequest) -> DayPlanDraft:
     """실제 Claude 를 1회 호출한다. [비용 발생]"""
-    import anthropic
-
-    client = anthropic.Anthropic(
-        api_key=load_api_key(ANTHROPIC_KEY_VAR),
-        timeout=CLAUDE_TIMEOUT,
-        max_retries=CLAUDE_MAX_RETRIES,
-    )
     request = {
+        "stage": "arrange",  # 한 작업에 호출이 둘이라 기록에서 가른다
         "trip": trip.model_dump(),  # 기록용
         "system": SYSTEM_PROMPT,
         "candidates": json.loads(payload),
     }
+    return call_and_record(
+        model, SYSTEM_PROMPT, payload, DayPlanDraft, CLAUDE_TIMEOUT, request
+    )
+
+
+def call_and_record(
+    model: str,
+    system: str,
+    payload: str,
+    output_format,
+    timeout: int,
+    request: dict,
+):
+    """
+    Claude 를 1회 부르고 호출 기록을 남긴다. [비용 발생]
+
+    배치와 글쓰기(llm_write)가 같이 쓴다 — 기록·비용 계산이 두 벌로 갈라지지 않게.
+    request 는 기록에 남길 입력이다 (모델에게 보내는 것은 system · payload).
+    """
+    import anthropic
+
+    client = anthropic.Anthropic(
+        api_key=load_api_key(ANTHROPIC_KEY_VAR),
+        timeout=timeout,
+        max_retries=CLAUDE_MAX_RETRIES,
+    )
 
     started = time.monotonic()
     try:
-        response = claude_call(client, model, payload)
+        response = claude_call(client, model, system, payload, output_format)
     except LLMError as exc:
         calllog.record(
             model,
@@ -489,8 +479,12 @@ def load_api_key(key_var: str) -> str:
     raise LLMError(f"{ENV_PATH} 에 {key_var} 값이 비어 있습니다.")
 
 
-def claude_call(client, model: str, payload: str):
-    """SDK 를 부르고 실패를 전부 LLMError 로 바꾼다. 기록은 부르는 쪽에서 한다."""
+def claude_call(client, model: str, system: str, payload: str, output_format):
+    """
+    SDK 를 부르고 실패를 전부 LLMError 로 바꾼다. 기록은 부르는 쪽에서 한다.
+
+    배치(DayPlanDraft)와 글쓰기(WriterDraft)가 함께 쓴다 — 지시문과 응답 모양만 다르다.
+    """
     import anthropic
     import pydantic
 
@@ -498,20 +492,18 @@ def claude_call(client, model: str, payload: str):
         response = client.messages.parse(
             model=model,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            system=system,
             thinking={"type": "adaptive"},
             output_config={"effort": EFFORT},
             messages=[{"role": "user", "content": payload}],
-            output_format=DayPlanDraft,
+            output_format=output_format,
         )
     except anthropic.RateLimitError as exc:
         raise LLMError(f"호출 한도 초과: {exc}") from exc
     # 시간 초과는 네트워크 실패의 한 종류라, 아래 APIConnectionError 보다 먼저 잡아야 갈린다
     except anthropic.APITimeoutError as exc:
-        raise LLMError(
-            f"시간 초과 ({CLAUDE_TIMEOUT}초): {exc}", kind="timeout"
-        ) from exc
-    # SDK 가 응답 글자를 DayPlanDraft 로 읽다 실패했다 (깨진 JSON · 칸 누락 · 잘린 응답)
+        raise LLMError(f"시간 초과: {exc}", kind="timeout") from exc
+    # SDK 가 응답 글자를 output_format 으로 읽다 실패했다 (깨진 JSON · 칸 누락 · 잘린 응답)
     except pydantic.ValidationError as exc:
         # 답을 쓰다 MAX_TOKENS 에 닿으면 JSON 이 중간에 끊겨 'EOF while parsing' 이 된다.
         # SDK 가 해석부터 하고 던져서 stop_reason 을 볼 수 없다

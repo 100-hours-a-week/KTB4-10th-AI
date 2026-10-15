@@ -3,10 +3,16 @@ src/llm/fake_llm.py
 
 **가짜 모델.** Claude 대신 고정 규칙으로 답한다. 호출 0회, 같은 입력에 같은 출력.
 
+답이 둘이다 — 배치(plan_all)와 글쓰기(write_all). 진짜도 두 번 부른다 (#35).
+
 쓰는 곳이 둘이다.
-    서버 부하 테스트 — LLM_MODE=fake 이면 llm_plan.plan_all 이 Claude 대신 answer() 를 부른다.
-                      **Claude 를 부르는 자리만** 대신하므로 응답 검사·후처리는 진짜와 똑같이 돈다.
-    테스트·로컬 도구 — tools/fake_llm.py 가 plan_all() 로 llm_plan.plan_all 을 통째로 바꿔 끼운다.
+    서버 부하 테스트 — LLM_MODE=fake 이면 llm_plan.plan_all 이 Claude 대신 answer() 를,
+                      llm_write.write_all 이 write_all() 을 부른다. **Claude 를 부르는 자리만**
+                      대신하므로 응답 검사·후처리는 진짜와 똑같이 돈다.
+                      기다리는 시간(FAKE_LLM_DELAY_SEC)은 배치에만 둔다 — 값 하나로 작업 전체의
+                      모델 시간을 흉내 내던 부하 테스트 설정을 그대로 쓰게 하려고.
+    테스트·로컬 도구 — tools/fake_llm.py 가 llm_plan.plan_all · llm_write.write_all 을 통째로
+                      바꿔 끼운다.
 
 2026-09-29 전에는 tools/ 에만 있었다 ("서버는 항상 실제 모델"). 클라우드팀 부하 테스트에
 Claude 를 부르면 돈이 나가고 응답 시간도 매번 달라서, 기본은 진짜로 두고 스위치로만 켜게 했다.
@@ -19,7 +25,15 @@ import time
 from datetime import date, timedelta
 
 from src import dates
-from src.models import Candidate, DayDraft, DayPlanDraft, PlanDraftItem
+from src.models import (
+    Candidate,
+    DayDraft,
+    DayPlanDraft,
+    PlanDraftItem,
+    PlanItem,
+    Reason,
+    WriterDraft,
+)
 
 # 가짜가 답하기 전에 기다릴 초. 진짜 Claude 의 30~50초를 흉내 내는 용도
 DELAY_VAR = "FAKE_LLM_DELAY_SEC"
@@ -107,12 +121,41 @@ def plan_all(
                 break
             bucket.append(place)
 
+    return DayPlanDraft(items=_fake_items(buckets))
+
+
+def write_all(
+    plan: list[PlanItem],
+    candidates: list[Candidate],
+    *,
+    start: date,
+    day_count: int,
+    conditions: dict,
+    trip: object | None = None,
+) -> WriterDraft:
+    """
+    배치된 곳으로 고정 문구를 낸다. 검사(llm_write._validate_*)를 통과하는 답이어야 한다.
+
+    start · trip 은 받기만 한다. llm_write.write_all 자리에 그대로 끼우려면 모양이 같아야 한다.
+    """
+    by_id = {candidate.content_id: candidate for candidate in candidates}
+    # plan 은 일차·차례 순이다 (nodes.number_by_time)
+    buckets = [
+        [by_id[item.content_id] for item in plan if item.day == day]
+        for day in range(1, day_count + 1)
+    ]
+    reasons = [
+        Reason(content_id=candidate.content_id, reason=_fake_reason(candidate))
+        for bucket in buckets
+        for candidate in bucket
+    ]
+
     region = conditions["region"]
-    return DayPlanDraft(
+    return WriterDraft(
         title=f"{region} 여행",
         intro=f"{region}에서 {day_count}일 동안 다니는 일정이에요.",
         days=[_fake_day(day, bucket) for day, bucket in enumerate(buckets, start=1)],
-        items=_fake_items(buckets),
+        reasons=reasons,
     )
 
 
@@ -175,7 +218,6 @@ def _fake_items(buckets: list[list[Candidate]]) -> list[PlanDraftItem]:
                     day=day_index + 1,
                     start_time=f"{hour:02d}:00",
                     duration_minutes=DURATION_MINUTES,
-                    reason=_fake_reason(candidate),
                 )
             )
 

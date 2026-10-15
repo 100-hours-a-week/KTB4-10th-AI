@@ -205,7 +205,7 @@ def record_generation(
     job_id: str,
     accepted_at: datetime,
     request: dict,
-    llm_call: str | None,
+    llm_calls: list[str],
     response: dict,
 ) -> None:
     """
@@ -213,8 +213,9 @@ def record_generation(
 
     LLM 기록(llm_calls/)만으로는 어느 요청에서 나온 호출인지, 백엔드가 최종으로 무엇을
     받았는지 알 수 없다. 그래서 백엔드 요청 원본 · LLM 기록 파일 이름 · 최종 응답을 한 파일에
-    묶는다. llm_call 은 모델을 안 불렀거나(가짜 모드·호출 전 실패) 호출이 아직 안 끝났으면
-    (작업 시간 초과) None 이다.
+    묶는다. llm_calls 는 이 요청에서 남긴 호출 기록 파일들이다 — 배치·글쓰기 순서로 둘
+    (2026-10-15 부터, #35. 그 전 기록은 llm_call 하나). 모델을 안 불렀거나(가짜 모드·호출
+    전 실패) 호출이 아직 안 끝났으면(작업 시간 초과) 그만큼 빠진다.
 
     파일 이름은 접수 시각 + request_id — 시간순으로 서고, 백엔드 쪽 번호로 바로 찾는다.
     """
@@ -233,7 +234,7 @@ def record_generation(
         "accepted_at": accepted_at.isoformat(timespec="seconds"),
         "finished_at": finished_at.isoformat(timespec="seconds"),
         "request": request,
-        "llm_call": llm_call,
+        "llm_calls": llm_calls,
         "response": response,
     }
     path.write_text(json.dumps(detail, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -243,24 +244,24 @@ def start_run() -> None:
     """
     이 실행 흐름의 기록 상자를 새로 만든다. 그래프를 돌리기 **전에** 부른다.
 
-    안 부르면 last_call_file() 이 늘 None 이다 — 기록 파일은 그대로 남고, 결과와
+    안 부르면 call_files() 가 늘 빈 목록이다 — 기록 파일은 그대로 남고, 결과와
     잇는 이름표만 빠진다. 서버는 작업마다 부른다 (generations/ 기록에 이름을 적으려고).
     """
-    _CURRENT_RUN.set({"last_call_file": None})
+    _CURRENT_RUN.set({"call_files": []})
 
 
 def _remember(path: str) -> None:
     run = _CURRENT_RUN.get()
     if run is not None:
-        run["last_call_file"] = path
+        run["call_files"].append(path)
 
 
-def last_call_file() -> str | None:
-    """이 실행 흐름에서 마지막으로 남긴 호출 기록 파일. 아직 안 불렀으면 None."""
+def call_files() -> list[str]:
+    """이 실행 흐름에서 남긴 호출 기록 파일들. 부른 순서(배치 → 글쓰기)다."""
     run = _CURRENT_RUN.get()
     if run is None:
-        return None
-    return run["last_call_file"]
+        return []
+    return run["call_files"]
 
 
 def _print_call(

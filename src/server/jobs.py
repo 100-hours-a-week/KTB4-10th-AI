@@ -31,7 +31,9 @@ from src.server import adapter
 
 MAX_CONCURRENCY = 3  # 동시에 LLM 을 부르는 작업 수. 분당 한도를 아직 모른다
 MAX_QUEUE = 100
-JOB_TIMEOUT = 300  # 작업 하나에 최대 5분
+# 작업 하나에 최대 7분 30초. 배치·글쓰기 호출의 최악을 더한 것보다 길어야 한다
+# (계산은 llm_plan.CLAUDE_TIMEOUT 주석, 확인은 test_observability)
+JOB_TIMEOUT = 450
 # 끝난 작업을 남겨 두는 시간. 결과 가져가기·같은 요청 재전송보다 넉넉하게
 JOB_TTL = timedelta(hours=24)
 
@@ -205,14 +207,14 @@ async def _process(job: dict) -> None:
     except asyncio.TimeoutError:
         # 스레드는 계속 돌고 있다. wait_for 는 스레드를 죽이지 못한다
         # 그래서 LLM 쪽 최악 소요(재시도 포함)를 JOB_TIMEOUT 보다 짧게 잡아 뒀다
-        # (llm_plan.CLAUDE_TIMEOUT).
+        # (llm_plan.CLAUDE_TIMEOUT · llm_write.WRITE_TIMEOUT).
         _fail(
             job, "generation_timeout", "일정 생성 시간이 초과되었습니다.", "job_timeout"
         )
     except InsufficientCandidates as exc:
         _fail(job, "insufficient_candidates", str(exc), "insufficient_candidates")
     except LLMError as exc:
-        _fail(job, "generation_failed", str(exc), f"llm_{exc.kind}")
+        _fail(job, "generation_failed", str(exc), f"llm_{exc.stage}_{exc.kind}")
     except Exception as exc:
         # 예상 못 한 오류. 원인을 찾으려면 어디서 났는지가 필요하다
         detail = "".join(traceback.format_exception(exc))
@@ -239,7 +241,7 @@ def _save_generation(job: dict) -> None:
             job_id=job["job_id"],
             accepted_at=job["accepted_at"],
             request=job["request"],
-            llm_call=calllog.last_call_file(),
+            llm_calls=calllog.call_files(),
             response=response,
         )
     except Exception as exc:
@@ -267,7 +269,7 @@ async def _generate(job: dict) -> Itinerary:
 
 def _succeed(job: dict, itinerary: Itinerary) -> None:
     """
-    빈 일정은 여기까지 오지 않는다 — 후보가 일수보다 적으면 nodes.plan 이,
+    빈 일정은 여기까지 오지 않는다 — 후보가 일수보다 적으면 nodes.arrange 가,
     빈 날이 있으면 llm_plan 의 검사가 먼저 멈춘다.
     """
     # 계약 형식대로 모양을 만들어 result에 넣는다.
