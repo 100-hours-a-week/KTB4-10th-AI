@@ -157,8 +157,12 @@ def record(
     근거가 이것뿐인데, 예전에는 기록에 없어서 매번 손으로 재야 했다.
     **2026-09-27 에 추가했다 — 그 이전 기록에는 이 칸이 없다.**
     """
+    # 운영(SAVE_MODE=OFF)에는 로그 한 줄만 남는다. 배치·글쓰기를 그 줄에서 가르려고 (#35)
+    stage = request.get("stage")
     if not save_mode():
-        _print_call(model, None, error, input_tokens, output_tokens, cost, elapsed)
+        _print_call(
+            model, stage, None, error, input_tokens, output_tokens, cost, elapsed
+        )
         return
 
     now = datetime.now(KST)
@@ -196,7 +200,9 @@ def record(
 
     _remember(f"{CALL_DIR_REL}/{filename}")
 
-    _print_call(model, filename, error, input_tokens, output_tokens, cost, elapsed)
+    _print_call(
+        model, stage, filename, error, input_tokens, output_tokens, cost, elapsed
+    )
 
 
 def record_generation(
@@ -266,6 +272,7 @@ def call_files() -> list[str]:
 
 def _print_call(
     model: str,
+    stage: str | None,
     filename: str | None,
     error: str | None,
     input_tokens: int | None,
@@ -286,6 +293,7 @@ def _print_call(
             "ERROR",
             "llm_call_failed",
             llm_mode="real",
+            stage=stage,
             model=model,
             error=error,
             elapsed_sec=seconds,
@@ -297,6 +305,7 @@ def _print_call(
         "INFO",
         "llm_call",
         llm_mode="real",
+        stage=stage,
         model=model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
