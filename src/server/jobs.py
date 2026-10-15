@@ -31,9 +31,9 @@ from src.server import adapter
 
 MAX_CONCURRENCY = 3  # 동시에 LLM 을 부르는 작업 수. 분당 한도를 아직 모른다
 MAX_QUEUE = 100
-# 작업 하나에 최대 7분 30초. 배치·글쓰기 호출의 최악을 더한 것보다 길어야 한다
+# 작업 하나에 최대 10분. 배치·글쓰기 호출의 최악을 더한 것보다 길어야 한다
 # (계산은 llm_arrange.ARRANGE_TIMEOUT 주석, 확인은 test_observability)
-JOB_TIMEOUT = 450
+JOB_TIMEOUT = 600
 # 끝난 작업을 남겨 두는 시간. 결과 가져가기·같은 요청 재전송보다 넉넉하게
 JOB_TTL = timedelta(hours=24)
 
