@@ -19,7 +19,7 @@ import json
 import time
 import traceback
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from src import logs, metrics
 from src.engine import graph
@@ -32,6 +32,8 @@ from src.server import adapter
 MAX_CONCURRENCY = 3  # 동시에 LLM 을 부르는 작업 수. 분당 한도를 아직 모른다
 MAX_QUEUE = 100
 JOB_TIMEOUT = 300  # 작업 하나에 최대 5분
+# 끝난 작업을 남겨 두는 시간. 결과 가져가기·같은 요청 재전송보다 넉넉하게
+JOB_TTL = timedelta(hours=24)
 
 # 작업 하나 = 딕셔너리 하나. 서버를 내리면 사라진다.
 jobs: dict[str, dict] = {}
@@ -111,6 +113,8 @@ def accept(
 
     request 는 백엔드가 보낸 본문 그대로다 — 끝날 때 generations/ 기록에 넣는다.
     """
+    _purge_expired()
+
     job = {
         "job_id": str(uuid.uuid4()),
         "status": "pending",
@@ -137,6 +141,20 @@ def accept(
     # 큐에 넣는 것에 성공하면 request_map 에 job_id 를 적는다.
     request_map[request_id] = job["job_id"]
     return job
+
+
+def _purge_expired() -> None:
+    """
+    접수한 지 JOB_TTL 이 지난 끝난 작업을 지운다.
+    지우지 않으면 서버를 내릴 때까지 메모리에 쌓인다.
+    """
+    now = datetime.now(calllog.KST)
+    for job_id, job in list(jobs.items()):
+        if job["status"] not in ("completed", "failed"):
+            continue
+        if now - job["accepted_at"] > JOB_TTL:
+            del jobs[job_id]
+            del request_map[job["request_id"]]
 
 
 def accepted(job: dict) -> dict:
