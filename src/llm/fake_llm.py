@@ -3,15 +3,15 @@ src/llm/fake_llm.py
 
 **가짜 모델.** Claude 대신 고정 규칙으로 답한다. 호출 0회, 같은 입력에 같은 출력.
 
-답이 둘이다 — 배치(plan_all)와 글쓰기(write_all). 진짜도 두 번 부른다 (#35).
+답이 둘이다 — 배치(arrange_all)와 글쓰기(write_all). 진짜도 두 번 부른다 (#35).
 
 쓰는 곳이 둘이다.
-    서버 부하 테스트 — LLM_MODE=fake 이면 llm_plan.plan_all 이 Claude 대신 answer() 를,
+    서버 부하 테스트 — LLM_MODE=fake 이면 llm_arrange.arrange_all 이 Claude 대신 answer() 를,
                       llm_write.write_all 이 write_all() 을 부른다. **Claude 를 부르는 자리만**
                       대신하므로 응답 검사·후처리는 진짜와 똑같이 돈다.
                       기다리는 시간(FAKE_LLM_DELAY_SEC)은 배치에만 둔다 — 값 하나로 작업 전체의
                       모델 시간을 흉내 내던 부하 테스트 설정을 그대로 쓰게 하려고.
-    테스트·로컬 도구 — tools/fake_llm.py 가 llm_plan.plan_all · llm_write.write_all 을 통째로
+    테스트·로컬 도구 — tools/fake_llm.py 가 llm_arrange.arrange_all · llm_write.write_all 을 통째로
                       바꿔 끼운다.
 
 2026-09-29 전에는 tools/ 에만 있었다 ("서버는 항상 실제 모델"). 클라우드팀 부하 테스트에
@@ -71,9 +71,9 @@ def answer(
     per_day: int,
     conditions: dict,
 ) -> DayPlanDraft:
-    """서버의 가짜 모드. 정해 둔 만큼 기다렸다가 plan_all 과 같은 답을 낸다."""
+    """서버의 가짜 모드. 정해 둔 만큼 기다렸다가 arrange_all 과 같은 답을 낸다."""
     time.sleep(delay_seconds())
-    return plan_all(
+    return arrange_all(
         candidates,
         start=start,
         day_count=day_count,
@@ -82,7 +82,7 @@ def answer(
     )
 
 
-def plan_all(
+def arrange_all(
     candidates: list[Candidate],
     *,
     start: date,
@@ -98,7 +98,7 @@ def plan_all(
     프롬프트가 모델에게 시키는 규칙과 같다. 가짜가 검사(_validate_all)를 통과하는
     답을 내야 조립 이후 단계를 모델 없이 돌려 볼 수 있다.
 
-    trip 은 받기만 한다. llm_plan.plan_all 자리에 그대로 끼우려면 모양이 같아야 한다.
+    trip 은 받기만 한다. llm_arrange.arrange_all 자리에 그대로 끼우려면 모양이 같아야 한다.
     """
     buckets: list[list[Candidate]] = [[] for _ in range(day_count)]
 

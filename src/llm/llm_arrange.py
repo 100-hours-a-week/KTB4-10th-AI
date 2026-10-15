@@ -1,5 +1,5 @@
 """
-src/llm/llm_plan.py
+src/llm/llm_arrange.py
 
 **일정을 배치하는 모델 호출 (arrange).** 후보를 전부 넘기고, 무엇을 고를지·어느 날에
 둘지·몇 시에 갈지까지 모델이 정한다. 문구(제목·소개·하루 요약·추천 이유)는 쓰지 않는다 —
@@ -9,11 +9,10 @@ src/llm/llm_plan.py
 나란히 있었다. 그 경로를 지우면서 같은 자리 합치기·붙이기도 함께 버렸다 — 이 경로에는
 처음부터 없던 기능이다 (docs/archive/claude-260928/plan/llm-plan-only.md).
 
-설정·키 읽기·SDK 호출·기록 부품(call_and_record · claude_call · LLMError)도 여기 있고
-llm_write 가 가져다 쓴다. 2026-09-28 에 부품 파일(py)을 합쳤다. Gemini 호출을 지우자
-Claude 호출 부품만 남아 따로 둘 이유가 없어졌다.
+Claude 를 부르는 부품(설정 · LLMError · call_and_record)은 llm_client 에 있다.
+2026-10-15 까지 이 파일 이름은 llm_arrange.py 였다 (#35).
 
-**plan_all 은 기본으로 Claude 를 부른다.** 모델은 LLM_MODEL (비우면 claude-sonnet-5).
+**arrange_all 은 기본으로 Claude 를 부른다.** 모델은 LLM_MODEL (비우면 claude-sonnet-5).
 LLM_MODE=fake 일 때만 Claude 를 부르는 자리를 가짜(src/llm/fake_llm.py)가 대신한다 —
 클라우드팀 부하 테스트용 (2026-09-29). 검사·후처리는 두 모드가 똑같이 돈다.
 
@@ -34,15 +33,9 @@ from datetime import date, timedelta
 
 from src import dates, logs, metrics
 from src.engine import data
-from src.llm import calllog, fake_llm
+from src.llm import fake_llm, llm_client
+from src.llm.llm_client import LLMError
 from src.models import Candidate, DayPlanDraft, PlanDraftItem, TripRequest
-from src.paths import REPO_ROOT
-
-DEFAULT_MODEL = "claude-sonnet-5"
-# 생각 포함. 최악 조합(종로구 관심 장소 177곳 · 7일 35곳)이 16000 중 15586 을 써서
-# 올렸다 (2026-10-11). 한도는 상한일 뿐이라 쓰지 않으면 비용이 늘지 않는다
-MAX_TOKENS = 20000
-EFFORT = "medium"  # 기본값은 high. 일정 배치가 무거운 일이 아니라 낮춰서 시작한다
 
 # 배치 호출 한 건의 상한. SDK 는 **시간 초과도 재시도**하므로 시간 초과가 두 번
 # 이어지면 140 × 2 + 재시도 대기(이때는 8초 이하) = 288초다. 여기에 글쓰기 호출의 최악
@@ -50,54 +43,7 @@ EFFORT = "medium"  # 기본값은 high. 일정 배치가 무거운 일이 아니
 # 작업이 실패로 접힌 뒤 실이 혼자 계속 돌지 않는다.
 # 다만 서버가 429·5xx 에 retry-after 를 붙이면 SDK 는 그만큼 상한 없이 기다려 작업 상한을
 # 넘을 수 있다 (드묾).
-CLAUDE_TIMEOUT = 140
-CLAUDE_MAX_RETRIES = 1
-
-ENV_PATH = REPO_ROOT / ".env"
-MODEL_VAR = "LLM_MODEL"
-ANTHROPIC_KEY_VAR = "ANTHROPIC_API_KEY"
-
-# real (비워 둬도 real) · fake. 인프라에 알려 준 이름이라 바꾸면 클라우드팀에도 알린다
-MODE_VAR = "LLM_MODE"
-MODES = ("real", "fake")
-
-
-class LLMError(RuntimeError):
-    """
-    LLM 호출이나 응답 검증이 실패했다. 작업은 generation_failed 로 끝난다.
-
-    kind 는 로그와 /metrics 에서 원인을 가르는 이름이다. 계약 응답의 코드와는 무관하다.
-        call       — 호출 실패 (한도 · 네트워크 · API 오류 · 거부)
-        timeout    — 호출이 시간 상한을 넘었다
-        parse      — 응답이 DayPlanDraft · WriterDraft 모양이 아니다
-        truncated  — 출력이 MAX_TOKENS 에서 잘렸다 (생각 중이든 답을 쓰던 중이든)
-        validation — 모양은 맞는데 규칙을 어겼다 (_validate_all · llm_write 의 검사)
-        fake       — 가짜 모드에서 가짜가 실패했다
-
-    stage 는 어느 단계에서 났나 ("arrange" · "write"). 어느 단계가 자주 틀리는지 재려고
-    실패 이름을 llm_arrange_validation 처럼 가른다 (#35).
-    """
-
-    def __init__(self, message: str, kind: str = "call", stage: str = ""):
-        super().__init__(message)
-        self.kind = kind
-        self.stage = stage
-
-
-def llm_mode() -> str:
-    """
-    LLM_MODE 를 읽는다. 비우면 real.
-
-    모르는 값이면 멈춘다. 오타("fak")를 real 로 읽으면 부하 테스트가 조용히 과금되고,
-    fake 로 읽으면 운영이 조용히 가짜 일정을 낸다. 서버가 켜질 때 한 번 불러 미리 막는다.
-    """
-    raw = os.environ.get(MODE_VAR, "").strip().lower()
-    if not raw:
-        return "real"
-    if raw not in MODES:
-        raise LLMError(f"{MODE_VAR} 는 real 또는 fake 여야 합니다: {raw!r}")
-    return raw
-
+ARRANGE_TIMEOUT = 140
 
 # 하루에 둘 수 있는 행사 수. 프롬프트·페이로드·검사 세 군데가 같은 값을 봐야 한다.
 MAX_EVENTS_PER_DAY = 1
@@ -144,7 +90,7 @@ SYSTEM_PROMPT = """당신은 여행 일정을 짜는 도우미입니다.
 # ============================================================
 
 
-def plan_all(
+def arrange_all(
     candidates: list[Candidate],
     *,
     start: date,
@@ -160,17 +106,20 @@ def plan_all(
     모델에게 보내지 않는 **기록용**이다. 라벨로 바꾸는 일은 부르는 쪽(nodes.arrange)이 한다 —
     코드표는 engine 에 있고, 여기서 engine 을 부르면 engine ↔ llm 폴더 순환이 된다.
     """
-    mode = llm_mode()
+    mode = llm_client.llm_mode()
     started = time.monotonic()
     try:
         if mode == "fake":
-            draft = _fake_plan_all(candidates, start, day_count, per_day, conditions)
+            draft = _fake_arrange_all(candidates, start, day_count, per_day, conditions)
         else:
             payload = _candidates_to_payload(
                 candidates, start, day_count, per_day, conditions
             )
-            model = os.environ.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
-            draft = _claude_plan_all(model, payload, trip)
+            model = (
+                os.environ.get(llm_client.MODEL_VAR, "").strip()
+                or llm_client.DEFAULT_MODEL
+            )
+            draft = _claude_arrange_all(model, payload, trip)
     except LLMError as exc:
         exc.stage = "arrange"
         raise
@@ -342,7 +291,7 @@ def _validate_all(
             )
 
 
-def _fake_plan_all(
+def _fake_arrange_all(
     candidates: list[Candidate],
     start: date,
     day_count: int,
@@ -378,7 +327,7 @@ def _fake_plan_all(
     return draft
 
 
-def _claude_plan_all(model: str, payload: str, trip: TripRequest) -> DayPlanDraft:
+def _claude_arrange_all(model: str, payload: str, trip: TripRequest) -> DayPlanDraft:
     """실제 Claude 를 1회 호출한다. [비용 발생]"""
     request = {
         "stage": "arrange",  # 한 작업에 호출이 둘이라 기록에서 가른다
@@ -386,141 +335,6 @@ def _claude_plan_all(model: str, payload: str, trip: TripRequest) -> DayPlanDraf
         "system": SYSTEM_PROMPT,
         "candidates": json.loads(payload),
     }
-    return call_and_record(
-        model, SYSTEM_PROMPT, payload, DayPlanDraft, CLAUDE_TIMEOUT, request
+    return llm_client.call_and_record(
+        model, SYSTEM_PROMPT, payload, DayPlanDraft, ARRANGE_TIMEOUT, request
     )
-
-
-def call_and_record(
-    model: str,
-    system: str,
-    payload: str,
-    output_format,
-    timeout: int,
-    request: dict,
-):
-    """
-    Claude 를 1회 부르고 호출 기록을 남긴다. [비용 발생]
-
-    배치와 글쓰기(llm_write)가 같이 쓴다 — 기록·비용 계산이 두 벌로 갈라지지 않게.
-    request 는 기록에 남길 입력이다 (모델에게 보내는 것은 system · payload).
-    """
-    import anthropic
-
-    client = anthropic.Anthropic(
-        api_key=load_api_key(ANTHROPIC_KEY_VAR),
-        timeout=timeout,
-        max_retries=CLAUDE_MAX_RETRIES,
-    )
-
-    started = time.monotonic()
-    try:
-        response = claude_call(client, model, system, payload, output_format)
-    except LLMError as exc:
-        calllog.record(
-            model,
-            request,
-            mode="llm",
-            error=str(exc),
-            elapsed=time.monotonic() - started,
-        )
-        raise
-
-    usage = response.usage
-    calllog.record(
-        model,
-        request,
-        mode="llm",
-        response_text=response.parsed_output.model_dump_json(),
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        cost=calllog.claude_cost(model, usage.input_tokens, usage.output_tokens),
-        elapsed=time.monotonic() - started,
-    )
-
-    return response.parsed_output
-
-
-# ============================================================
-# 호출 부품
-# ============================================================
-
-
-def load_api_key(key_var: str) -> str:
-    """
-    환경변수가 우선이고, 없으면 저장소 뿌리의 .env 파일을 직접 읽는다.
-
-    환경변수를 먼저 보는 이유: 배포는 도커라 컨테이너 안에 .env 파일이 없다
-    (.dockerignore 가 뺀다). 호스트의 .env 는 `docker run --env-file` 로 **환경변수가
-    되어** 들어온다. 2026-09-28 에 .env 파일만 읽게 바꿨다가 배포에서 서버가 안 켜졌다.
-
-    python-dotenv 를 쓰지 않는 이유는 의존성이 하나 더 늘어서다. 형식이 단순해 직접 읽는
-    편이 낫다.
-    """
-    # 환경변수
-    from_env = os.environ.get(key_var, "").strip()
-    if from_env:
-        return from_env
-
-    if not ENV_PATH.exists():  # .env 파일이 없으면
-        raise LLMError(f"환경변수 {key_var} 도 {ENV_PATH} 도 없습니다.")
-
-    for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, _, value = line.partition("=")
-        if name.strip() != key_var:
-            continue
-        cleaned = value.strip().strip('"').strip("'")
-        if cleaned:
-            return cleaned
-
-    raise LLMError(f"{ENV_PATH} 에 {key_var} 값이 비어 있습니다.")
-
-
-def claude_call(client, model: str, system: str, payload: str, output_format):
-    """
-    SDK 를 부르고 실패를 전부 LLMError 로 바꾼다. 기록은 부르는 쪽에서 한다.
-
-    배치(DayPlanDraft)와 글쓰기(WriterDraft)가 함께 쓴다 — 지시문과 응답 모양만 다르다.
-    """
-    import anthropic
-    import pydantic
-
-    try:
-        response = client.messages.parse(
-            model=model,
-            max_tokens=MAX_TOKENS,
-            system=system,
-            thinking={"type": "adaptive"},
-            output_config={"effort": EFFORT},
-            messages=[{"role": "user", "content": payload}],
-            output_format=output_format,
-        )
-    except anthropic.RateLimitError as exc:
-        raise LLMError(f"호출 한도 초과: {exc}") from exc
-    # 시간 초과는 네트워크 실패의 한 종류라, 아래 APIConnectionError 보다 먼저 잡아야 갈린다
-    except anthropic.APITimeoutError as exc:
-        raise LLMError(f"시간 초과: {exc}", kind="timeout") from exc
-    # SDK 가 응답 글자를 output_format 으로 읽다 실패했다 (깨진 JSON · 칸 누락 · 잘린 응답)
-    except pydantic.ValidationError as exc:
-        # 답을 쓰다 MAX_TOKENS 에 닿으면 JSON 이 중간에 끊겨 'EOF while parsing' 이 된다.
-        # SDK 가 해석부터 하고 던져서 stop_reason 을 볼 수 없다
-        if "EOF while parsing" in str(exc):
-            raise LLMError(
-                f"출력이 {MAX_TOKENS} 토큰에서 잘렸습니다", kind="truncated"
-            ) from exc
-        raise LLMError(f"응답 파싱 실패: {exc}", kind="parse") from exc
-    except anthropic.APIConnectionError as exc:
-        raise LLMError(f"네트워크 실패: {exc}") from exc
-    except anthropic.APIStatusError as exc:
-        raise LLMError(f"API 오류 {exc.status_code}: {exc.message}") from exc
-
-    # 생각만 하다 MAX_TOKENS 에 닿으면 답 칸이 비어 SDK 가 오류 없이 돌려준다
-    if response.stop_reason == "max_tokens":
-        raise LLMError(f"출력이 {MAX_TOKENS} 토큰에서 잘렸습니다", kind="truncated")
-    if response.stop_reason == "refusal":
-        raise LLMError(f"모델이 거부했습니다: {response.stop_details}")
-
-    return response

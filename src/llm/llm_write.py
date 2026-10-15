@@ -1,7 +1,7 @@
 """
 src/llm/llm_write.py
 
-**가이드북 문구를 쓰는 모델 호출 (write).** 배치(llm_plan.plan_all)가 끝난 일정을 받아
+**가이드북 문구를 쓰는 모델 호출 (write).** 배치(llm_arrange.arrange_all)가 끝난 일정을 받아
 제목·소개·하루 요약·추천 이유를 한 번에 쓴다. 날짜·순서·시각은 바꾸지 않는다.
 
 배치와 나눈 이유 (2026-10-15, #35): 글의 근거로 장소 소개글(overview)을 넣는데, 후보
@@ -11,7 +11,7 @@ src/llm/llm_write.py
 나중에 이 호출을 자체 모델로 바꾼다. 지시문은 v7 이 아니라 #26 의 문구 규칙에 overview
 규칙을 더한 것이다 (v7 로 갈지는 자체 모델로 바꿀 때 정한다).
 
-Claude 를 부르고 기록하는 부품(call_and_record · LLMError)은 llm_plan 의 것을 쓴다.
+Claude 를 부르고 기록하는 부품(call_and_record · LLMError)은 llm_client 의 것을 쓴다.
 """
 
 from __future__ import annotations
@@ -22,12 +22,13 @@ import time
 from datetime import date, timedelta
 
 from src import metrics
-from src.llm import fake_llm, llm_plan
-from src.llm.llm_plan import LLMError
+from src.llm import fake_llm, llm_arrange, llm_client
+from src.llm.llm_client import LLMError
 from src.models import Candidate, DayDraft, PlanItem, Reason, TripRequest, WriterDraft
 
 # 글쓰기 호출 한 건의 상한. 출력이 짧아 배치보다 훨씬 짧게 둔다.
-# 시간 초과가 두 번 이어지면 60 × 2 + 재시도 대기(8초 이하) = 128초 (llm_plan.CLAUDE_TIMEOUT 참고)
+# 시간 초과가 두 번 이어지면 60 × 2 + 재시도 대기(8초 이하) = 128초
+# (llm_arrange.ARRANGE_TIMEOUT 참고)
 WRITE_TIMEOUT = 60
 
 # 자체 모델 학습 데이터가 overview 를 200자로 잘라 넣었다. 입력 모양을 그와 같게 둔다
@@ -80,9 +81,9 @@ def write_all(
     **글쓰기(write).** 배치가 끝난 일정(plan)을 받아 문구를 쓴다.
 
     candidates 는 plan 의 content_id 로 이름·분류·주소·overview 를 찾는 데만 쓴다.
-    conditions·trip 은 llm_plan.plan_all 과 같다 (모델에게 보낼 조건 · 기록용).
+    conditions·trip 은 llm_arrange.arrange_all 과 같다 (모델에게 보낼 조건 · 기록용).
     """
-    mode = llm_plan.llm_mode()
+    mode = llm_client.llm_mode()
     started = time.monotonic()
     try:
         if mode == "fake":
@@ -96,7 +97,8 @@ def write_all(
         else:
             payload = _plan_to_payload(plan, candidates, start, day_count, conditions)
             model = (
-                os.environ.get(llm_plan.MODEL_VAR, "").strip() or llm_plan.DEFAULT_MODEL
+                os.environ.get(llm_client.MODEL_VAR, "").strip()
+                or llm_client.DEFAULT_MODEL
             )
             draft = _claude_write_all(model, payload, trip)
     except LLMError as exc:
@@ -149,7 +151,7 @@ def _plan_to_payload(
 
 def _place_entry(item: PlanItem, candidate: Candidate) -> dict:
     """배치 때 보인 모양에 시각·머무는 시간과 글의 재료(overview)를 더한다."""
-    entry = llm_plan.candidate_entry(candidate)
+    entry = llm_arrange.candidate_entry(candidate)
     entry["start_time"] = item.start_time
     entry["duration_minutes"] = item.duration_minutes
     entry["overview"] = candidate.overview[:OVERVIEW_MAX_CHARS]
@@ -193,6 +195,6 @@ def _claude_write_all(model: str, payload: str, trip: TripRequest) -> WriterDraf
         "system": SYSTEM_PROMPT,
         "plan": json.loads(payload),
     }
-    return llm_plan.call_and_record(
+    return llm_client.call_and_record(
         model, SYSTEM_PROMPT, payload, WriterDraft, WRITE_TIMEOUT, request
     )

@@ -13,7 +13,7 @@ from datetime import timedelta
 
 from src import dates
 from src.engine import data, distance
-from src.llm import llm_plan, llm_write
+from src.llm import llm_arrange, llm_write
 from src.models import (
     Candidate,
     Coordinates,
@@ -226,7 +226,7 @@ def arrange(state: GraphState) -> dict:
             f"후보 {len(candidates)}곳으로 {state['day_count']}일을 채울 수 없습니다"
         )
 
-    draft = llm_plan.plan_all(
+    draft = llm_arrange.arrange_all(
         candidates,
         start=dates.parse_backend(request.start_date),
         day_count=state["day_count"],
@@ -289,7 +289,7 @@ def trip_conditions(request: TripRequest) -> dict:
 
 
 def _minutes(hhmm: str) -> int:
-    """형식은 llm_plan._validate_all 이 이미 확인했다 (CLOCK_TIME)."""
+    """형식은 llm_arrange._validate_all 이 이미 확인했다 (CLOCK_TIME)."""
     hour, minute = hhmm.split(":")
     return int(hour) * 60 + int(minute)
 
@@ -420,7 +420,8 @@ def build(state: GraphState) -> dict:
     start = dates.parse_backend(request.start_date)
     days: dict[int, list[PlannedPlace]] = {}
 
-    # 없는 id 는 llm_plan · llm_write 의 검사가 이미 막는다. 여기서 조용히 버리지 않고 멈추게 둔다
+    # 없는 id 는 llm_arrange · llm_write 의 검사가 이미 막는다.
+    # 여기서 조용히 버리지 않고 멈추게 둔다
     for item in sorted(state["plan"], key=lambda i: (i.day, i.order)):
         candidate = by_id[item.content_id]
         reason = state["reasons"][item.content_id]
