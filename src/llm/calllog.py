@@ -58,6 +58,8 @@ KST = timezone(timedelta(hours=9))
 # LLM_MODEL 로 모델을 바꾸면 여기에 그 모델이 있어야 기록된 비용이 맞는다.
 CLAUDE_PRICING = {
     "claude-opus-5": (5, 25),
+    # 추천 이유 채점(tools/reason_judge.py)이 쓴다. 서버는 부르지 않는다 (2026-10-15)
+    "claude-opus-5-5": (4, 20),
     "claude-sonnet-5": (2, 10),
     "claude-haiku-4-5": (1, 5),
 }

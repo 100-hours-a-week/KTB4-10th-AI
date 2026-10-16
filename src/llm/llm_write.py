@@ -9,8 +9,17 @@ src/llm/llm_write.py
 
 입력·출력 모양은 자체 모델 학습 데이터(samples/open_model/label_inputs_v7.jsonl)를 따른다 —
 나중에 이 호출을 자체 모델로 바꾼다. 지시문은 v7 이 아니라 #26 의 문구 규칙에 overview
-규칙을 더한 것이다 (v7 로 갈지는 자체 모델로 바꿀 때 정한다). 추천 이유는 v7 처럼 한 문장이다 —
-두 문장일 때 둘째가 늘 같은 순서 설명이 되어 틀이 되풀이됐다 (#36).
+규칙을 더한 것이다 (v7 로 갈지는 자체 모델로 바꿀 때 정한다).
+
+추천 이유는 장소 소개가 아니라 여행자의 조건(관심사·여행 스타일)과 장소를 잇는 글이다 (#39).
+한 문장(#36)으로는 조건과 장소의 점을 함께 담지 못해 소개만 남았다. 그래서 문장 수 대신
+글자 수(70~150자)로 둔다. 두 문장 시절 둘째가 늘 순서 설명이 되던 문제는 순서 금지로 막는다.
+글자 수는 검수하지 않는다 — 몇 자 어긋났다고 작업 전체를 실패로 돌릴 일이 아니다.
+예문은 두지 않는다 — 넣을 때마다 모델이 예문의 문장 모양을 모든 이유에 되풀이했다
+(#36 "~에서는 … 있습니다", #39 1차 "~여행이라면"). 사실과 평가의 순서도 정하지 않는다 —
+정하자 모든 이유가 "[사실]으로, [조건]에 ~해줍니다" 한 모양이 됐다 (#39 2차).
+"왜 좋은지"는 금지어 대신 정의로 준다 — 말을 금지하면 같은 내용을 다른 말로 썼다
+("~할 수 있습니다" → "느껴보게 합니다"). 측정: docs/claude/log/measurement/reason-quality.md
 
 Claude 를 부르고 기록하는 부품(call_and_record · LLMError)은 llm_client 의 것을 쓴다.
 """
@@ -18,6 +27,7 @@ Claude 를 부르고 기록하는 부품(call_and_record · LLMError)은 llm_cli
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import date, timedelta
 
@@ -30,8 +40,11 @@ from src.models import Candidate, DayDraft, PlanItem, Reason, TripRequest, Write
 # 60초에서는 실호출 글쓰기가 첫 시도에서 자주 넘겼다 (#36)
 WRITE_TIMEOUT = 120
 
-# 자체 모델 학습 데이터가 overview 를 200자로 잘라 넣었다. 입력 모양을 그와 같게 둔다
+# 자체 모델 학습 데이터가 overview 를 200자로 잘라 넣었다. 입력 모양을 그와 같게 둔다.
+# 백엔드는 300자까지 보낸다 (2026-10-16)
 OVERVIEW_MAX_CHARS = 200
+# 마지막 마침표가 이보다 앞이면 문장에서 끊지 않는다 — 재료가 너무 짧아진다
+OVERVIEW_MIN_SENTENCE_CHARS = 100
 
 SYSTEM_PROMPT = """당신은 여행 가이드북 문구를 쓰는 작가입니다.
 
@@ -56,17 +69,23 @@ SYSTEM_PROMPT = """당신은 여행 가이드북 문구를 쓰는 작가입니�
 - 관심사·여행 스타일 이름("하천·해양", "전시 시설")은 그대로 옮기지 말고 그 장소에 맞게 풀어 씁니다.
 - 동행(친구·연인·가족·단체·혼자)은 넣더라도 **하루에 한 장소의 이유까지**,
   하루 요약에도 한 번까지입니다.
-- reasons — places 의 **content_id 마다 하나씩.** reason 은 **그 장소의 이름을 넣은 한 문장**입니다.
-  왜 이곳인지를 그 장소에서 무엇을 보고 할 수 있는지(이름·분류·overview 에 드러난 것)로 씁니다.
-  fit 이 "관심사"면 trip 의 관심사와 잇고, 아니면 그 장소의 특징으로 씁니다.
-  여행 스타일은 그 장소와 어울릴 때만 넣습니다.
-  도는 순서는 하루 요약이 씁니다 — 이유에는 쓰지 마세요.
-  같은 틀을 되풀이하지 말고 시작과 끝맺음을 바꿔 가며 씁니다. 특히 "○○에게 알맞습니다",
-  "○○에게 추천합니다"처럼 대상을 정하는 말로 끝내지 마세요.
-  문장 구조가 서로 다른 예:
-    "곡성향교에서는 앞쪽의 명륜당과 뒤쪽의 대성전으로 나뉜 전학후묘 배치를 둘러볼 수 있습니다."
-    "임진왜란 때 의병을 길렀던 청계동계곡은 매끄러운 바위에 앉아 물가에서 쉬어 가기 좋습니다."
-  (예문은 다른 일정의 것입니다. 그대로 베끼지 말고 받은 일정에 맞게 쓰세요.)
+- reasons — places 의 **content_id 마다 하나씩.** reason 은 그 장소의 이름을 넣어
+  **70~150자**로 씁니다. 문장 수는 자유입니다.
+  reason 은 장소 소개가 아니라 **이 여행자에게 왜 이곳인지**입니다.
+  이 장소의 구체적인 점 하나(분류·overview 에 있는 것)를 골라, 그것이 이 여행자의 조건에
+  왜 좋은지를 씁니다. 조건은 fit 이 "관심사"면 trip 의 관심사, 아니면 여행 스타일이나
+  장소의 성격입니다. overview 의 사실을 여러 개 늘어놓지 말고, 조건과 이어지는 것 하나만 고릅니다.
+  왜 좋은지는 고른 사실에서 따라 나오는 말로 씁니다. 그 사실을 지우면 성립하지 않는 평가여야
+  합니다. 첫 장소·마무리·시작점처럼 일정 속 자리는 이유가 아닙니다.
+  관심사 이름을 문장에 넣을 필요는 없습니다 — 내용이 관심사에 답하면 됩니다.
+  trip 에 없는 관심사(예: 고르지 않은 '지질')를 지어내지 마세요.
+  여행 스타일은 그 뜻 그대로만 씁니다. 머무는 시간이 길다고 "여유롭게"라고 쓰지 말고,
+  "효율적으로"인 여행에 "여유 있게"·"넉넉하게"를 쓰지 마세요.
+  도는 순서·이동은 하루 요약이 씁니다 — 이유에는 쓰지 마세요.
+  모든 이유가 같은 모양이 되지 않게 시작과 끝맺음을 바꿔 가며 씁니다. 특히 아래 틀은 쓰지 마세요:
+    - "~에 관심 있는 여행자라면", "~하는 여행이라면"처럼 조건을 문장 앞에 붙이는 시작
+    - "~할 수 있습니다", "~곳입니다"로 끝나는 이유를 잇달아 쓰는 것
+    - "○○에게 알맞습니다", "○○에게 추천합니다"처럼 대상을 정하는 끝맺음
 - title — **15자 이내.** 지역과 여행의 성격이 드러나게 (예: "경주 역사 여행").
   날짜·일수는 넣지 마세요 — 표지에 따로 적힙니다.
 - intro — 여행을 소개하는 한 문장.
@@ -157,8 +176,18 @@ def _place_entry(item: PlanItem, candidate: Candidate) -> dict:
     entry = llm_arrange.candidate_entry(candidate)
     entry["start_time"] = item.start_time
     entry["duration_minutes"] = item.duration_minutes
-    entry["overview"] = candidate.overview[:OVERVIEW_MAX_CHARS]
+    entry["overview"] = _cut_overview(candidate.overview)
     return entry
+
+
+def _cut_overview(overview: str) -> str:
+    """앞 200자로 자르되, 그 안에 마침표가 있으면 그 문장까지 (100자 이상일 때)."""
+    flattened = re.sub(r"\s+", " ", overview).strip()
+    head = flattened[:OVERVIEW_MAX_CHARS]
+    last_period = head.rfind(".")
+    if last_period >= OVERVIEW_MIN_SENTENCE_CHARS:
+        return head[: last_period + 1]
+    return head
 
 
 def _validate_days(days: list[DayDraft], day_count: int) -> None:
