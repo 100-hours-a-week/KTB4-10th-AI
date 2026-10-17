@@ -32,13 +32,19 @@ import time
 from datetime import date, timedelta
 
 from src import metrics
-from src.llm import fake_llm, llm_arrange, llm_client
+from src.engine import data
+from src.llm import fake_llm, llm_arrange, llm_client, v7_prompt, vllm_client
 from src.llm.llm_client import LLMError
 from src.models import Candidate, DayDraft, PlanItem, Reason, TripRequest, WriterDraft
 
 # 글쓰기 호출 한 건의 상한 (재시도까지 더한 최악은 llm_arrange.ARRANGE_TIMEOUT 주석).
 # 60초에서는 실호출 글쓰기가 첫 시도에서 자주 넘겼다 (#36)
 WRITE_TIMEOUT = 120
+
+# 런팟 vLLM 글쓰기의 상한. L4 에서 초당 약 15토큰이라 학습 데이터 최장 답(2,659토큰)이
+# 약 177초 걸린다 — 120초면 긴 일정이 실패했다 (2026-10-17, 7일 35곳).
+# 재시도는 없다(vllm_client.VLLM_MAX_RETRIES) — 배치 최악 288초 + 240초가 작업 상한 600초 안
+VLLM_WRITE_TIMEOUT = 240
 
 # 자체 모델 학습 데이터가 overview 를 200자로 잘라 넣었다. 입력 모양을 그와 같게 둔다.
 # 백엔드는 300자까지 보낸다 (2026-10-16)
@@ -73,8 +79,9 @@ SYSTEM_PROMPT = """당신은 여행 가이드북 문구를 쓰는 작가입니�
   **70~150자**로 씁니다. 문장 수는 자유입니다.
   reason 은 장소 소개가 아니라 **이 여행자에게 왜 이곳인지**입니다.
   이 장소의 구체적인 점 하나(분류·overview 에 있는 것)를 골라, 그것이 이 여행자의 조건에
-  왜 좋은지를 씁니다. 조건은 fit 이 "관심사"면 trip 의 관심사, 아니면 여행 스타일이나
-  장소의 성격입니다. overview 의 사실을 여러 개 늘어놓지 말고, 조건과 이어지는 것 하나만 고릅니다.
+  왜 좋은지를 씁니다. 조건은 taste 가 관심사 이름이면 그 관심사, "비슷한 취향(…)"이면
+  괄호 안의 분야, "취향 밖"이면 여행 스타일이나 장소의 성격입니다.
+  overview 의 사실을 여러 개 늘어놓지 말고, 조건과 이어지는 것 하나만 고릅니다.
   왜 좋은지는 고른 사실에서 따라 나오는 말로 씁니다. 그 사실을 지우면 성립하지 않는 평가여야
   합니다. 첫 장소·마무리·시작점처럼 일정 속 자리는 이유가 아닙니다.
   관심사 이름을 문장에 넣을 필요는 없습니다 — 내용이 관심사에 답하면 됩니다.
@@ -121,8 +128,13 @@ def write_all(
                 conditions=conditions,
             )
         else:
-            payload = _plan_to_payload(plan, candidates, start, day_count, conditions)
-            draft = _claude_write_all(llm_client.model_name(), payload, trip)
+            payload = _plan_to_payload(
+                plan, candidates, start, day_count, conditions, trip.detail_codes
+            )
+            if vllm_client.write_backend() == "vllm":
+                draft = _vllm_write_all(payload, trip)
+            else:
+                draft = _claude_write_all(llm_client.model_name(), payload, trip)
     except LLMError as exc:
         exc.stage = "write"
         raise
@@ -147,15 +159,19 @@ def _plan_to_payload(
     start: date,
     day_count: int,
     conditions: dict,
+    detail_codes: list[str],
 ) -> str:
-    """배치된 곳만 날짜별로 묶어 JSON 으로 만든다. 모양은 v7 학습 데이터의 입력과 같다."""
+    """
+    배치된 곳만 날짜별로 묶어 JSON 으로 만든다. 모양은 v7 학습 데이터의 입력과 같다.
+    detail_codes 는 여행자가 고른 취향 코드 — 장소마다 taste 를 매기는 데 쓴다.
+    """
     by_id = {candidate.content_id: candidate for candidate in candidates}
 
     days = []
     for day in range(1, day_count + 1):
         # plan 은 nodes.number_by_time 이 일차·차례 순으로 세워 두었다
         places = [
-            _place_entry(item, by_id[item.content_id])
+            _place_entry(item, by_id[item.content_id], detail_codes)
             for item in plan
             if item.day == day
         ]
@@ -171,13 +187,52 @@ def _plan_to_payload(
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _place_entry(item: PlanItem, candidate: Candidate) -> dict:
-    """배치 때 보인 모양에 시각·머무는 시간과 글의 재료(overview)를 더한다."""
-    entry = llm_arrange.candidate_entry(candidate)
-    entry["start_time"] = item.start_time
-    entry["duration_minutes"] = item.duration_minutes
-    entry["overview"] = _cut_overview(candidate.overview)
+def _place_entry(item: PlanItem, candidate: Candidate, detail_codes: list[str]) -> dict:
+    """
+    배치된 곳 한 줄. 칸과 순서를 v7 학습 데이터의 입력과 같게 둔다 — 글쓰기를 자체 모델로
+    바꿀 때 학습 때와 같은 모양을 보이려고. 배치의 fit 대신 taste 를 넣는다.
+    """
+    shown = llm_arrange.candidate_entry(candidate)
+    entry = {
+        "content_id": shown["content_id"],
+        "name": shown["name"],
+        "category": shown["category"],
+        "address": shown["address"],
+        "kind": shown["kind"],
+        "taste": taste_label(candidate.category_code, detail_codes),
+        "start_time": item.start_time,
+        "duration_minutes": item.duration_minutes,
+        "overview": _cut_overview(candidate.overview),
+    }
+    if candidate.pick == "event":
+        entry["event_start_date"] = shown["event_start_date"]
+        entry["event_end_date"] = shown["event_end_date"]
     return entry
+
+
+def taste_label(category_code: str, detail_codes: list[str]) -> str:
+    """
+    장소가 여행자의 어느 취향에 닿는지를 v7 학습 데이터의 taste 와 같은 말로.
+        고른 중분류  → 그 관심사 이름 ("역사 유적지")
+        같은 대분류  → "비슷한 취향(역사)"
+        그 밖       → "취향 밖"
+
+    배치의 fit 은 「관심사인가」만 알려 준다. 글쓰기는 **어느** 관심사와 이을지가 필요하다.
+    고르는 규칙은 nodes.prepare · find_places 와 같다 — 도시공원(EXTRA_LCLS2)은 관심사로만
+    잡고, 대분류 넓히기에는 1:1 표만 쓴다. 행사도 같은 규칙이다 (v7 도 그렇다).
+    """
+    known_codes = [code for code in detail_codes if code in data.DETAIL_TO_LCLS2]
+    for code in known_codes:
+        matched = [data.DETAIL_TO_LCLS2[code], *data.EXTRA_LCLS2.get(code, [])]
+        if category_code in matched:
+            return data.preference_label(code)
+
+    families = {data.DETAIL_TO_LCLS2[code][:2] for code in known_codes}
+    family = category_code[:2]
+    if family in families:
+        theme = data.preference_label(data.FAMILY_THEMES[family])
+        return f"비슷한 취향({theme})"
+    return "취향 밖"
 
 
 def _cut_overview(overview: str) -> str:
@@ -229,4 +284,26 @@ def _claude_write_all(model: str, payload: str, trip: TripRequest) -> WriterDraf
     }
     return llm_client.call_and_record(
         model, SYSTEM_PROMPT, payload, WriterDraft, WRITE_TIMEOUT, request
+    )
+
+
+def _vllm_write_all(payload: str, trip: TripRequest) -> WriterDraft:
+    """
+    런팟 vLLM(자체 모델)을 1회 호출한다. 지시문은 VLLM_PROMPT 로 고른다 —
+    v7(기본, 모델이 학습한 그대로) 또는 claude(위 SYSTEM_PROMPT).
+    """
+    if vllm_client.prompt_choice() == "claude":
+        system = SYSTEM_PROMPT
+    else:
+        system = v7_prompt.SYSTEM_PROMPT
+    request = {
+        "stage": "write",
+        "backend": "vllm",  # 기록에서 Claude 글쓰기와 가르려고
+        "prompt": vllm_client.prompt_choice(),
+        "trip": trip.model_dump(),
+        "system": system,
+        "plan": json.loads(payload),
+    }
+    return vllm_client.call_and_record(
+        system, payload, WriterDraft, VLLM_WRITE_TIMEOUT, request
     )
