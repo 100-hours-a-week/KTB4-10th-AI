@@ -20,7 +20,8 @@ MAX_DAYS = 7  # 계약 2장
 # 백엔드는 그 지역 후보를 개수 제한 없이 전부 보낸다 (2026-10-07 결정). 덤프 기준 최대는
 # 제주시 441개 — 정상 요청은 걸리지 않고, 고장 난 요청만 막는 값이다
 MAX_CONTENTS = 1000
-MAX_TITLE = 15  # 계약 7장
+MAX_TITLE = 15  # 계약 7장. 재생성 요청의 title 도 같은 상한
+MAX_FEEDBACK = 200  # 재생성 피드백 (설계 명세서 AI-rest-api.xlsx)
 MIN_PEOPLE = 1
 MAX_PEOPLE = 10
 
@@ -159,6 +160,27 @@ def _code(label: object, preference_type: str) -> str:
     if code is None:
         raise InputError("invalid_preference_mapping", f"표에 없는 취향: {label!r}")
     return code
+
+
+def to_feedback(payload: dict) -> tuple[str, str | None]:
+    """
+    재생성 본문의 feedback(필수)과 title(선택)을 꺼낸다.
+    title 이 없거나 빈 문자열이면 None — 이전 제목을 쓴다.
+    """
+    feedback = payload.get("feedback")
+    if not isinstance(feedback, str) or not feedback:
+        raise InputError("invalid_request", "feedback 이 없다")
+    if len(feedback) > MAX_FEEDBACK:
+        raise InputError("invalid_request", f"feedback 이 {MAX_FEEDBACK}자를 넘는다")
+
+    title = payload.get("title") or None
+    if title is None:
+        return feedback, None
+    if not isinstance(title, str) or len(title) > MAX_TITLE:
+        raise InputError(
+            "invalid_request", f"title 이 문자열이 아니거나 {MAX_TITLE}자를 넘는다"
+        )
+    return feedback, title
 
 
 def to_candidates(contents: object) -> tuple[list[Candidate], list[Candidate]]:

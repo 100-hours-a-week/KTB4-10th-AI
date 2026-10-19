@@ -22,8 +22,8 @@ import uuid
 from datetime import datetime, timedelta
 
 from src import logs, metrics
-from src.engine import graph
-from src.engine.nodes import InsufficientCandidates
+from src.engine import graph, nodes
+from src.engine.nodes import FeedbackNotApplicable, InsufficientCandidates
 from src.llm import calllog
 from src.llm.llm_client import LLMError
 from src.models import Candidate, Itinerary, TripRequest
@@ -131,7 +131,48 @@ def accept(
         "request": request,  # 백엔드 요청 본문
         "accepted_at": datetime.now(calllog.KST),
     }
+    _enqueue(job)
+    return job
 
+
+def accept_regeneration(
+    source: dict,
+    feedback: str,
+    title: str | None,
+    request_id: str,
+    mark: str,
+    request: dict,
+) -> dict:
+    """
+    재생성 작업을 새로 만들어 큐에 넣는다. 원래 작업(source)은 고치지 않는다 —
+    완료가 다시 진행 중이 되고, 실패하면 원래 데이터를 잃기 때문이다.
+    """
+    _purge_expired()
+
+    job = {
+        "job_id": str(uuid.uuid4()),
+        "status": "pending",
+        "result": None,
+        "error": None,
+        # 원래 작업의 조건·후보를 그대로 옮긴다 (plan 정할 것 7)
+        "trip": source["trip"],
+        "places": source["places"],
+        "events": source["events"],
+        "source_job_id": source["job_id"],
+        "previous_itinerary": source["itinerary"],
+        "feedback": feedback,
+        "title": title,
+        "fingerprint": mark,
+        "request_id": request_id,
+        "request": request,
+        "accepted_at": datetime.now(calllog.KST),
+    }
+    _enqueue(job)
+    return job
+
+
+def _enqueue(job: dict) -> None:
+    """저장소에 넣고 큐에 넣는다. 큐가 만원이면 저장소에서 다시 빼고 QueueFull 을 올린다."""
     # 저장소(jobs)에 먼저 넣는다. 큐에 먼저 넣으면 워커가 꺼냈을 때 저장소에 아직 없을 수 있다.
     jobs[job["job_id"]] = job
     try:
@@ -141,8 +182,7 @@ def accept(
         raise
 
     # 큐에 넣는 것에 성공하면 request_map 에 job_id 를 적는다.
-    request_map[request_id] = job["job_id"]
-    return job
+    request_map[job["request_id"]] = job["job_id"]
 
 
 def _purge_expired() -> None:
@@ -213,6 +253,8 @@ async def _process(job: dict) -> None:
         )
     except InsufficientCandidates as exc:
         _fail(job, "insufficient_candidates", str(exc), "insufficient_candidates")
+    except FeedbackNotApplicable as exc:
+        _reject(job, str(exc))
     except LLMError as exc:
         _fail(job, "generation_failed", str(exc), f"llm_{exc.stage}_{exc.kind}")
     except Exception as exc:
@@ -262,9 +304,29 @@ async def _generate(job: dict) -> Itinerary:
     (다른 워커,접수,조회 모두)
     따라서 asyncio.to_thread로 별도 스레드로 넘겨서 이벤트 루프는 그동안 다른 일을 한다.
     """
+    if "source_job_id" in job:
+        return await asyncio.to_thread(_regenerate, job)
     return await asyncio.to_thread(
         graph.run, job["trip"], places=job["places"], events=job["events"]
     )
+
+
+def _regenerate(job: dict) -> Itinerary:
+    """
+    재생성 1회. 후보는 원래 작업 것을 그대로 쓴다 — 피드백으로 뺀 곳은 이 작업의
+    배치에서 이미 빠져 있고, 다음 재생성은 그 배치에서 시작한다 (plan 정할 것 7, 10-17 다시 정함).
+    """
+    previous = job["previous_itinerary"]
+    itinerary = graph.run_regeneration(
+        job["trip"],
+        places=job["places"],
+        events=job["events"],
+        previous_plan=nodes.plan_from_itinerary(previous),
+        feedback=job["feedback"],
+    )
+    # 제목만 바꾸는 재생성은 없다 — title 이 없으면 이전 제목 그대로 (plan 정할 것 3)
+    itinerary.title = job["title"] or previous.title
+    return itinerary
 
 
 def _succeed(job: dict, itinerary: Itinerary) -> None:
@@ -274,8 +336,28 @@ def _succeed(job: dict, itinerary: Itinerary) -> None:
     """
     # 계약 형식대로 모양을 만들어 result에 넣는다.
     job.update(status="completed", result=adapter.to_response(job["trip"], itinerary))
+    # 다음 재생성의 「이전 배치」 · 이전 제목 (#44)
+    job["itinerary"] = itinerary
     metrics.observe_post_processing()
     metrics.JOBS_TOTAL.labels(result="success").inc()
+
+
+def _reject(job: dict, reason: str) -> None:
+    """
+    재생성 피드백을 받을 수 없다. 실패로 알리되 오류로 세지 않는다 — 고장이 아니다
+    (_fail 은 ERROR 로그와 오류 숫자를 올려 알림이 울릴 수 있다).
+    거절한 피드백은 로그에 남긴다 — 재생성 사유 분포를 본다 (docs/design/05 · 07).
+    """
+    error = {"code": "feedback_not_applicable", "message": reason}
+    job.update(status="failed", error=error)
+    metrics.JOBS_TOTAL.labels(result="failed").inc()
+    logs.write(
+        "INFO",
+        "feedback_rejected",
+        job_id=job["job_id"],
+        feedback=job["feedback"],
+        reason=reason,
+    )
 
 
 def _fail(

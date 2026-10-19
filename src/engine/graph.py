@@ -16,7 +16,7 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from src.engine import nodes
-from src.models import Candidate, GraphState, Itinerary, TripRequest
+from src.models import Candidate, GraphState, Itinerary, PlanItem, TripRequest
 
 
 def build_graph():
@@ -61,5 +61,24 @@ def run(
         "request": request,
         "given_places": places,
         "given_events": events,
+    }
+    return build_graph().invoke(state)["result"]
+
+
+def run_regeneration(
+    request: TripRequest,
+    *,
+    places: list[Candidate],
+    events: list[Candidate],
+    previous_plan: list[PlanItem],
+    feedback: str,
+) -> Itinerary:
+    """재생성 (#44). 그래프는 생성과 같다 — arrange 가 state 의 feedback 을 보고 갈라진다."""
+    state = {
+        "request": request,
+        "given_places": places,
+        "given_events": events,
+        "previous_plan": previous_plan,
+        "feedback": feedback,
     }
     return build_graph().invoke(state)["result"]
