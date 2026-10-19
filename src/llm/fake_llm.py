@@ -4,6 +4,7 @@ src/llm/fake_llm.py
 **가짜 모델.** Claude 대신 고정 규칙으로 답한다. 호출 0회, 같은 입력에 같은 출력.
 
 답이 둘이다 — 배치(arrange_all)와 글쓰기(write_all). 진짜도 두 번 부른다 (#35).
+재생성 배치(rearrange_all, #44)는 이전 배치를 그대로 돌려준다.
 
 쓰는 곳이 둘이다.
     서버 부하 테스트 — LLM_MODE=fake 이면 llm_arrange.arrange_all 이 Claude 대신 answer() 를,
@@ -32,6 +33,7 @@ from src.models import (
     PlanDraftItem,
     PlanItem,
     Reason,
+    RegenerateDraft,
     WriterDraft,
 )
 
@@ -122,6 +124,28 @@ def arrange_all(
             bucket.append(place)
 
     return DayPlanDraft(items=_fake_items(buckets))
+
+
+def rearrange_all(
+    candidates: list[Candidate],
+    previous_plan: list[PlanItem],
+    feedback: str,
+    **_ignored,
+) -> RegenerateDraft:
+    """
+    가짜 재생성 — 이전 배치를 그대로 돌려준다. 피드백은 읽지 않는다.
+    llm_regenerate.rearrange_all 자리에 그대로 끼우려고 나머지 인자는 받기만 한다.
+    """
+    items = [
+        PlanDraftItem(
+            content_id=item.content_id,
+            day=item.day,
+            start_time=item.start_time,
+            duration_minutes=item.duration_minutes,
+        )
+        for item in previous_plan
+    ]
+    return RegenerateDraft(applicable=True, reject_reason="", items=items)
 
 
 def write_all(

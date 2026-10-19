@@ -13,7 +13,7 @@ from datetime import timedelta
 
 from src import dates
 from src.engine import data, distance
-from src.llm import llm_arrange, llm_write
+from src.llm import llm_arrange, llm_regenerate, llm_write
 from src.models import (
     Candidate,
     Coordinates,
@@ -208,6 +208,10 @@ class InsufficientCandidates(Exception):
     """후보가 여행 일수보다 적어 날마다 한 곳씩도 못 둔다. 작업 실패 insufficient_candidates."""
 
 
+class FeedbackNotApplicable(Exception):
+    """재생성 피드백을 일정에 반영할 수 없다. 작업 실패 feedback_not_applicable (#44)."""
+
+
 def arrange(state: GraphState) -> dict:
     """
     후보를 전부 넘기고 무엇을 고를지·어느 날에 둘지까지 모델이 정한다. 문구는 write 가 쓴다.
@@ -216,6 +220,9 @@ def arrange(state: GraphState) -> dict:
     규칙으로 강제하지는 않는다 (프롬프트의 「갈 수 있는 날이 적은 행사부터」).
 
     모델은 **order 가 없는 초안**을 돌려준다. 방문 차례는 여기서 시각을 보고 매긴다.
+
+    재생성이면(state 에 feedback) 이전 배치와 피드백을 넘겨 고친 배치를 받는다.
+    받을 수 없는 피드백이면 여기서 멈춘다 — 글쓰기를 부르지 않는다.
     """
     request = state["request"]
     candidates = state["events"] + state["places"]
@@ -225,6 +232,21 @@ def arrange(state: GraphState) -> dict:
         raise InsufficientCandidates(
             f"후보 {len(candidates)}곳으로 {state['day_count']}일을 채울 수 없습니다"
         )
+
+    if "feedback" in state:
+        regenerated = llm_regenerate.rearrange_all(
+            candidates,
+            state["previous_plan"],
+            state["feedback"],
+            start=dates.parse_backend(request.start_date),
+            day_count=state["day_count"],
+            per_day=state["per_day"],
+            conditions=trip_conditions(request),
+            trip=request,
+        )
+        if not regenerated.applicable:
+            raise FeedbackNotApplicable(regenerated.reject_reason)
+        return {"plan": number_by_time(regenerated.items)}
 
     draft = llm_arrange.arrange_all(
         candidates,
@@ -321,6 +343,21 @@ def number_by_time(drafts: list[PlanDraftItem]) -> list[PlanItem]:
                 )
             )
     return items
+
+
+def plan_from_itinerary(itinerary: Itinerary) -> list[PlanItem]:
+    """완료된 일정을 다음 재생성의 「이전 배치」로 되돌린다."""
+    return [
+        PlanItem(
+            content_id=place.content_id,
+            day=day.day,
+            order=place.order,
+            start_time=place.start_time,
+            duration_minutes=place.duration_minutes,
+        )
+        for day in itinerary.itinerary
+        for place in day.places
+    ]
 
 
 # ============================================================

@@ -116,6 +116,17 @@ class DayPlanDraft(BaseModel):
     items: list[PlanDraftItem]
 
 
+class RegenerateDraft(BaseModel):
+    """
+    재생성 배치 응답. 피드백을 받을 수 있는지부터 답하게 한다 —
+    applicable 이 false 면 items 는 비고 reject_reason 만 본다 (#44).
+    """
+
+    applicable: bool
+    reject_reason: str
+    items: list[PlanDraftItem]
+
+
 class Reason(BaseModel):
     """장소 하나의 추천 이유. 이름은 자체 모델 학습 데이터(v7)의 스키마와 같게 둔다."""
 
@@ -245,6 +256,10 @@ class GraphState(TypedDict, total=False):
     # find_places / find_events (병렬)
     places: list[Candidate]
     events: list[Candidate]
+
+    # 재생성일 때만 — 바깥에서 넣어 준다 (graph.run_regeneration). arrange 가 이것을 보고 갈라진다
+    feedback: str
+    previous_plan: list[PlanItem]
 
     # arrange
     plan: list[PlanItem]

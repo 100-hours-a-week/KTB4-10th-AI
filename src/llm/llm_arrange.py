@@ -170,8 +170,20 @@ def _candidates_to_payload(
     per_day: int,
     conditions: dict,
 ) -> str:
+    """모델에게 넘길 것을 JSON 으로 만든다. 무엇이 들어가는지는 payload_fields."""
+    fields = payload_fields(candidates, start, day_count, per_day, conditions)
+    return json.dumps(fields, ensure_ascii=False, indent=2)
+
+
+def payload_fields(
+    candidates: list[Candidate],
+    start: date,
+    day_count: int,
+    per_day: int,
+    conditions: dict,
+) -> dict:
     """
-    모델에게 넘길 것을 JSON 으로 만든다.
+    모델에게 넘길 칸. 재생성(llm_regenerate)이 여기에 이전 배치·피드백을 더해 쓴다.
 
     **행사 기간과 여행 날짜**가 들어간다 — 그게 없으면 모델이 날짜를 정할 근거가 없다.
     **여행 조건(trip)**도 들어간다 — 없으면 추천 이유와 제목을 조건에 맞춰 쓸 수 없다
@@ -192,7 +204,7 @@ def _candidates_to_payload(
 
     # 합계를 코드가 넣어 준다. days 길이 × per_day 를 모델이 곱하게 두면 개수를 놓친다
     # (2026-09-25 전북에서 25개 중 15·12개만 왔다).
-    payload = {
+    return {
         "trip": conditions,
         "days": days,
         "per_day": per_day,
@@ -201,7 +213,6 @@ def _candidates_to_payload(
         "max_events_total": MAX_EVENTS_PER_DAY * len(days),
         "candidates": listed,
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def _validate_all(
@@ -210,9 +221,13 @@ def _validate_all(
     start: date,
     day_count: int,
     per_day: int,
+    exact_count: bool = True,
 ) -> None:
     """
     모델이 돌려준 것이 규칙을 지켰는지 본다. 하나라도 어긋나면 멈춘다.
+
+    exact_count 를 끄면 「정확히 N개」만 건너뛴다 — 재생성은 "여유롭게"·"빼 줘"로
+    장소가 줄 수 있다 (#44). 하루 최대·하루 1곳 이상은 그대로 본다.
 
     일곱 가지를 보는데 성격이 둘로 갈린다 — **행사 기간 검사만이 사실 검사**이고
     (어기면 사용자에게 거짓 정보가 나간다), 나머지 여섯은 우리가 정한 형식·규칙이다.
@@ -237,7 +252,7 @@ def _validate_all(
     # 가장 적은 부산 연제구는 장소 8곳 (2026-10-11 덤프, 사진 없는 곳을 뺀 수).
     # 그런 데서는 다 넣어도 자리가 남으므로, 기대치는 둘 중 작은 쪽이다.
     expected = min(day_count * per_day, len(candidates))
-    if len(items) != expected:
+    if exact_count and len(items) != expected:
         raise LLMError(f"{expected}개를 배치해야 하는데 {len(items)}개가 왔습니다")
 
     out_of_range = sorted({i.day for i in items if not 1 <= i.day <= day_count})
