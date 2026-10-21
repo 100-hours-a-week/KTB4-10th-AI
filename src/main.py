@@ -284,8 +284,17 @@ async def regenerate(job_id: str, payload: dict) -> dict:
 @app.get("/guidebooks-generations/{job_id}")
 async def get_generation(job_id: str) -> dict:
     job = jobs.jobs.get(job_id)  # 저장소 jobs에서 꺼낸다.
-    if job is None:  # 없으면
-        raise HTTPException(404, detail="job_not_found")
+    if job is None:
+        # 재시작·24시간 정리로 사라진 작업도 백엔드가 실패로 확정하게 404 대신 실패로 답한다
+        # (백엔드 요청). 처음부터 없던 id 와 가를 수 없어 백엔드 버그가 묻히므로 로그는 남긴다
+        logs.write("WARNING", "job_not_found", job_id=job_id)
+        lost = {
+            "job_id": job_id,
+            "status": "failed",
+            "result": None,
+            "error": {"code": "job_not_found", "message": "작업을 찾을 수 없습니다."},
+        }
+        return _envelope("guidebook_failed", lost)
 
     # pending -> guidebook_pending, completed -> guidebook_completed ... (계약 5~8장)
     return _envelope(f"guidebook_{job['status']}", jobs.public(job))
