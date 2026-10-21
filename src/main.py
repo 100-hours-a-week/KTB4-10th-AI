@@ -287,5 +287,10 @@ async def get_generation(job_id: str) -> dict:
     if job is None:  # 없으면
         raise HTTPException(404, detail="job_not_found")
 
+    # 피드백 거절은 고장이 아니라 사용자에게 알릴 일이라, 백엔드가 응답 코드로 가르게 한다
+    error = job["error"]
+    if error is not None and error["code"] == "feedback_not_applicable":
+        raise HTTPException(422, detail="feedback_not_applicable")
+
     # pending -> guidebook_pending, completed -> guidebook_completed ... (계약 5~8장)
     return _envelope(f"guidebook_{job['status']}", jobs.public(job))
