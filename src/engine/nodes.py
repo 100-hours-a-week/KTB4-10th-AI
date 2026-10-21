@@ -1,7 +1,7 @@
 """
 src/engine/nodes.py
 
-그래프의 노드 5개 — prepare · find_places · find_events · plan · build.
+그래프의 노드 6개 — prepare · find_places · find_events · arrange · write · build.
 전부 "State를 받아 자기가 갱신할 칸만 담은 dict를 돌려준다".
 노드가 노드를 직접 부르지 않는다 — 연결은 graph.py가 한다.
 """
@@ -13,7 +13,7 @@ from datetime import timedelta
 
 from src import dates
 from src.engine import data, distance
-from src.llm import llm_plan
+from src.llm import llm_arrange, llm_regenerate, llm_write
 from src.models import (
     Candidate,
     Coordinates,
@@ -200,7 +200,7 @@ def find_events(state: GraphState) -> dict:
 
 
 # ============================================================
-# 4. plan — 모델에게 날짜·시각·문구를 받는다. 노드 중 이것만 모델을 부른다
+# 4. arrange — 모델에게 무엇을 어느 날 몇 시에 갈지 받는다
 # ============================================================
 
 
@@ -208,15 +208,21 @@ class InsufficientCandidates(Exception):
     """후보가 여행 일수보다 적어 날마다 한 곳씩도 못 둔다. 작업 실패 insufficient_candidates."""
 
 
-def plan(state: GraphState) -> dict:
+class FeedbackNotApplicable(Exception):
+    """재생성 피드백을 일정에 반영할 수 없다. 작업 실패 feedback_not_applicable (#44)."""
+
+
+def arrange(state: GraphState) -> dict:
     """
-    후보를 전부 넘기고 무엇을 고를지·어느 날에 둘지까지 모델이 정한다.
+    후보를 전부 넘기고 무엇을 고를지·어느 날에 둘지까지 모델이 정한다. 문구는 write 가 쓴다.
 
     행사를 앞에 두고 넘긴다 — 기간이 정해진 것부터 자리를 잡으라는 힌트다.
     규칙으로 강제하지는 않는다 (프롬프트의 「갈 수 있는 날이 적은 행사부터」).
 
     모델은 **order 가 없는 초안**을 돌려준다. 방문 차례는 여기서 시각을 보고 매긴다.
-    제목·소개·하루 요약은 손대지 않고 build 로 넘긴다.
+
+    재생성이면(state 에 feedback) 이전 배치와 피드백을 넘겨 고친 배치를 받는다.
+    받을 수 없는 피드백이면 여기서 멈춘다 — 글쓰기를 부르지 않는다.
     """
     request = state["request"]
     candidates = state["events"] + state["places"]
@@ -227,7 +233,22 @@ def plan(state: GraphState) -> dict:
             f"후보 {len(candidates)}곳으로 {state['day_count']}일을 채울 수 없습니다"
         )
 
-    draft = llm_plan.plan_all(
+    if "feedback" in state:
+        regenerated = llm_regenerate.rearrange_all(
+            candidates,
+            state["previous_plan"],
+            state["feedback"],
+            start=dates.parse_backend(request.start_date),
+            day_count=state["day_count"],
+            per_day=state["per_day"],
+            conditions=trip_conditions(request),
+            trip=request,
+        )
+        if not regenerated.applicable:
+            raise FeedbackNotApplicable(regenerated.reject_reason)
+        return {"plan": number_by_time(regenerated.items)}
+
+    draft = llm_arrange.arrange_all(
         candidates,
         start=dates.parse_backend(request.start_date),
         day_count=state["day_count"],
@@ -236,12 +257,37 @@ def plan(state: GraphState) -> dict:
         trip=request,
     )
 
+    return {"plan": number_by_time(draft.items)}
+
+
+# ============================================================
+# 5. write — 배치된 곳의 문구를 모델에게 받는다
+# ============================================================
+
+
+def write(state: GraphState) -> dict:
+    """
+    제목·소개·하루 요약·추천 이유를 받는다. 고른 곳의 overview 를 글의 재료로 쓴다.
+
+    배치와 나눈 이유: overview 를 후보 전부에 붙이면 입력이 몇 배가 된다 (#35).
+    """
+    request = state["request"]
+    draft = llm_write.write_all(
+        state["plan"],
+        state["events"] + state["places"],
+        start=dates.parse_backend(request.start_date),
+        day_count=state["day_count"],
+        conditions=trip_conditions(request),
+        trip=request,
+    )
+
     day_summaries = {day.day: day.summary for day in draft.days}
+    reasons = {reason.content_id: reason.reason for reason in draft.reasons}
     return {
-        "plan": number_by_time(draft.items),
         "title": draft.title,
         "intro": draft.intro,
         "day_summaries": day_summaries,
+        "reasons": reasons,
     }
 
 
@@ -265,7 +311,7 @@ def trip_conditions(request: TripRequest) -> dict:
 
 
 def _minutes(hhmm: str) -> int:
-    """형식은 llm_plan._validate_all 이 이미 확인했다 (CLOCK_TIME)."""
+    """형식은 llm_arrange._validate_all 이 이미 확인했다 (CLOCK_TIME)."""
     hour, minute = hhmm.split(":")
     return int(hour) * 60 + int(minute)
 
@@ -294,19 +340,35 @@ def number_by_time(drafts: list[PlanDraftItem]) -> list[PlanItem]:
                     order=order,
                     start_time=draft.start_time,
                     duration_minutes=draft.duration_minutes,
-                    reason=draft.reason,
                 )
             )
     return items
 
 
+def plan_from_itinerary(itinerary: Itinerary) -> list[PlanItem]:
+    """완료된 일정을 다음 재생성의 「이전 배치」로 되돌린다."""
+    return [
+        PlanItem(
+            content_id=place.content_id,
+            day=day.day,
+            order=place.order,
+            start_time=place.start_time,
+            duration_minutes=place.duration_minutes,
+        )
+        for day in itinerary.itinerary
+        for place in day.places
+    ]
+
+
 # ============================================================
-# 5. build — 사실 데이터를 붙여 최종 일정을 만든다
+# 6. build — 배치·문구에 사실 데이터를 붙여 최종 일정을 만든다
 # ============================================================
 
 
-def _to_planned_place(item: PlanItem, candidate: Candidate) -> PlannedPlace:
-    """LLM의 배치값과 우리 사실 데이터를 한 건으로 합친다. 출력 필드가 늘면 고칠 곳."""
+def _to_planned_place(
+    item: PlanItem, candidate: Candidate, reason: str
+) -> PlannedPlace:
+    """배치값·추천 이유와 우리 사실 데이터를 한 건으로 합친다. 출력 필드가 늘면 고칠 곳."""
     coordinates = None
     if candidate.lat is not None and candidate.lng is not None:
         coordinates = Coordinates(lat=candidate.lat, lng=candidate.lng)
@@ -316,7 +378,7 @@ def _to_planned_place(item: PlanItem, candidate: Candidate) -> PlannedPlace:
         order=item.order,
         start_time=item.start_time,
         duration_minutes=item.duration_minutes,
-        recommend_reason=item.reason,
+        recommend_reason=reason,
         # 우리가 갖고 있던 것 — LLM을 거치지 않는다
         content_id=candidate.content_id,
         name=candidate.name,
@@ -385,6 +447,7 @@ def _pick_cover(
 def build(state: GraphState) -> dict:
     """
     LLM이 돌려준 content_id에 사실 데이터를 붙이고, 날짜별로 묶어 최종 일정을 만든다.
+    배치(arrange)와 추천 이유(write)도 여기서 content_id 로 잇는다.
 
     이름·주소·좌표가 LLM을 거치지 않는 지점이 여기다.
     """
@@ -394,10 +457,12 @@ def build(state: GraphState) -> dict:
     start = dates.parse_backend(request.start_date)
     days: dict[int, list[PlannedPlace]] = {}
 
-    # 없는 id 는 llm_plan 의 검사가 이미 막는다. 여기서 조용히 버리지 않고 멈추게 둔다
+    # 없는 id 는 llm_arrange · llm_write 의 검사가 이미 막는다.
+    # 여기서 조용히 버리지 않고 멈추게 둔다
     for item in sorted(state["plan"], key=lambda i: (i.day, i.order)):
         candidate = by_id[item.content_id]
-        days.setdefault(item.day, []).append(_to_planned_place(item, candidate))
+        reason = state["reasons"][item.content_id]
+        days.setdefault(item.day, []).append(_to_planned_place(item, candidate, reason))
 
     day_summaries = state["day_summaries"]
     itinerary = [
@@ -405,7 +470,7 @@ def build(state: GraphState) -> dict:
             day=day,
             date=(start + timedelta(days=day - 1)).isoformat(),
             places=places,
-            # 모든 일차에 요약이 있는지는 llm_plan 의 검사가 이미 본다
+            # 모든 일차에 요약이 있는지는 llm_write 의 검사가 이미 본다
             summary=day_summaries[day],
         )
         for day, places in sorted(days.items())

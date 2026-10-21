@@ -71,6 +71,18 @@ EXTRA_LCLS2 = {
 }
 
 
+# TourAPI 대분류(중분류 코드 앞 두 글자) -> user_category_enum.csv 의 THEME 코드.
+# 글쓰기 입력의 "비슷한 취향(역사)" 에 대분류 이름을 넣으려고 쓴다 (llm_write.taste_label)
+FAMILY_THEMES = {
+    "NA": "NATURE",
+    "HS": "HISTORY",
+    "VE": "ATTRACTION",
+    "EX": "EXPERIENCE",
+    "LS": "LEISURE_SPORTS",
+    "EV": "EVENTS",
+}
+
+
 class DataError(Exception):
     """데이터 파일이 없거나 찾는 값이 표에 없을 때. 메시지를 그대로 사용자에게 보여준다."""
 

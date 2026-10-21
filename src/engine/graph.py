@@ -1,13 +1,14 @@
 """
 src/engine/graph.py
 
-노드 5개를 그래프로 잇는다. 노드 순서를 아는 곳은 여기뿐이다.
+노드 6개를 그래프로 잇는다. 노드 순서를 아는 곳은 여기뿐이다.
 
-    prepare ─┬─> find_places ─┬─> plan ──> build
+    prepare ─┬─> find_places ─┬─> arrange ──> write ──> build
              └─> find_events ─┘
 
 find_places와 find_events는 State의 다른 칸에 쓰므로 병렬로 돈다.
-langgraph가 둘 다 끝나기를 기다렸다가 plan으로 넘긴다.
+langgraph가 둘 다 끝나기를 기다렸다가 arrange로 넘긴다.
+arrange 가 배치를, write 가 문구를 모델에게 받는다 (2026-10-15 에 plan 하나를 나눴다, #35).
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from src.engine import nodes
-from src.models import Candidate, GraphState, Itinerary, TripRequest
+from src.models import Candidate, GraphState, Itinerary, PlanItem, TripRequest
 
 
 def build_graph():
@@ -25,15 +26,17 @@ def build_graph():
     graph.add_node("prepare", nodes.prepare)
     graph.add_node("find_places", nodes.find_places)
     graph.add_node("find_events", nodes.find_events)
-    graph.add_node("plan", nodes.plan)
+    graph.add_node("arrange", nodes.arrange)
+    graph.add_node("write", nodes.write)
     graph.add_node("build", nodes.build)
 
     graph.add_edge(START, "prepare")
     graph.add_edge("prepare", "find_places")  # 팬아웃 — 둘이 함께 출발한다
     graph.add_edge("prepare", "find_events")
-    graph.add_edge("find_places", "plan")  # 합류 — 둘 다 끝나야 시작된다
-    graph.add_edge("find_events", "plan")
-    graph.add_edge("plan", "build")
+    graph.add_edge("find_places", "arrange")  # 합류 — 둘 다 끝나야 시작된다
+    graph.add_edge("find_events", "arrange")
+    graph.add_edge("arrange", "write")
+    graph.add_edge("write", "build")
     graph.add_edge("build", END)
 
     return graph.compile()
@@ -58,5 +61,24 @@ def run(
         "request": request,
         "given_places": places,
         "given_events": events,
+    }
+    return build_graph().invoke(state)["result"]
+
+
+def run_regeneration(
+    request: TripRequest,
+    *,
+    places: list[Candidate],
+    events: list[Candidate],
+    previous_plan: list[PlanItem],
+    feedback: str,
+) -> Itinerary:
+    """재생성 (#44). 그래프는 생성과 같다 — arrange 가 state 의 feedback 을 보고 갈라진다."""
+    state = {
+        "request": request,
+        "given_places": places,
+        "given_events": events,
+        "previous_plan": previous_plan,
+        "feedback": feedback,
     }
     return build_graph().invoke(state)["result"]

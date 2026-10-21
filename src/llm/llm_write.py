@@ -1,0 +1,309 @@
+"""
+src/llm/llm_write.py
+
+**가이드북 문구를 쓰는 모델 호출 (write).** 배치(llm_arrange.arrange_all)가 끝난 일정을 받아
+제목·소개·하루 요약·추천 이유를 한 번에 쓴다. 날짜·순서·시각은 바꾸지 않는다.
+
+배치와 나눈 이유 (2026-10-15, #35): 글의 근거로 장소 소개글(overview)을 넣는데, 후보
+전부에 붙이면 입력이 몇 배가 된다. 고른 곳에만 붙이려면 배치가 먼저 끝나야 한다.
+
+입력·출력 모양은 자체 모델 학습 데이터(samples/open_model/label_inputs_v7.jsonl)를 따른다 —
+나중에 이 호출을 자체 모델로 바꾼다. 지시문은 v7 이 아니라 #26 의 문구 규칙에 overview
+규칙을 더한 것이다 (v7 로 갈지는 자체 모델로 바꿀 때 정한다).
+
+추천 이유는 장소 소개가 아니라 여행자의 조건(관심사·여행 스타일)과 장소를 잇는 글이다 (#39).
+한 문장(#36)으로는 조건과 장소의 점을 함께 담지 못해 소개만 남았다. 그래서 문장 수 대신
+글자 수(70~150자)로 둔다. 두 문장 시절 둘째가 늘 순서 설명이 되던 문제는 순서 금지로 막는다.
+글자 수는 검수하지 않는다 — 몇 자 어긋났다고 작업 전체를 실패로 돌릴 일이 아니다.
+예문은 두지 않는다 — 넣을 때마다 모델이 예문의 문장 모양을 모든 이유에 되풀이했다
+(#36 "~에서는 … 있습니다", #39 1차 "~여행이라면"). 사실과 평가의 순서도 정하지 않는다 —
+정하자 모든 이유가 "[사실]으로, [조건]에 ~해줍니다" 한 모양이 됐다 (#39 2차).
+"왜 좋은지"는 금지어 대신 정의로 준다 — 말을 금지하면 같은 내용을 다른 말로 썼다
+("~할 수 있습니다" → "느껴보게 합니다"). 측정: docs/claude/log/measurement/reason-quality.md
+
+Claude 를 부르고 기록하는 부품(call_and_record · LLMError)은 llm_client 의 것을 쓴다.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from datetime import date, timedelta
+
+from src import metrics
+from src.engine import data
+from src.llm import fake_llm, llm_arrange, llm_client, v7_prompt, vllm_client
+from src.llm.llm_client import LLMError
+from src.models import Candidate, DayDraft, PlanItem, Reason, TripRequest, WriterDraft
+
+# 글쓰기 호출 한 건의 상한 (재시도까지 더한 최악은 llm_arrange.ARRANGE_TIMEOUT 주석).
+# 60초에서는 실호출 글쓰기가 첫 시도에서 자주 넘겼다 (#36)
+WRITE_TIMEOUT = 120
+
+# 런팟 vLLM 글쓰기의 상한. L4 에서 초당 약 15토큰이라 학습 데이터 최장 답(2,659토큰)이
+# 약 177초 걸린다 — 120초면 긴 일정이 실패했다 (2026-10-17, 7일 35곳).
+# 재시도는 없다(vllm_client.VLLM_MAX_RETRIES) — 배치 최악 288초 + 240초가 작업 상한 600초 안
+VLLM_WRITE_TIMEOUT = 240
+
+# 자체 모델 학습 데이터가 overview 를 200자로 잘라 넣었다. 입력 모양을 그와 같게 둔다.
+# 백엔드는 300자까지 보낸다 (2026-10-16)
+OVERVIEW_MAX_CHARS = 200
+# 마지막 마침표가 이보다 앞이면 문장에서 끊지 않는다 — 재료가 너무 짧아진다
+OVERVIEW_MIN_SENTENCE_CHARS = 100
+
+SYSTEM_PROMPT = """당신은 여행 가이드북 문구를 쓰는 작가입니다.
+
+여행 조건(trip)과 이미 짜인 일정(days)을 받습니다. 날짜·순서·시각은 정해져 있으니
+바꾸지 말고, 문구만 씁니다.
+
+사실 — 아래 문구 전체에 적용:
+- **입력(이름·분류·주소·overview·행사 기간)에 있는 사실만 씁니다.** 입력에 없는 것은 쓰지 마세요.
+  특히 아래는 **overview 에 있을 때만** 씁니다: 역사적 사건·연도, 문화재 지정·번호,
+  운영·공연 시각, 요금, 해 지는 시각(노을·일몰·석양), 분위기·풍경(조용한·한적한·운치 있는),
+  평판(대표적인·유명한).
+- **place 의 overview 는 그 장소의 소개글입니다.** 문장을 그대로 베끼지 말고 풀어 쓰고,
+  다른 장소의 overview 를 섞지 마세요.
+- 행사 기간은 입력의 날짜와, 아침·점심·저녁 같은 시간대 말은 그 장소의 start_time 과 맞게 씁니다.
+- 위치는 주소·overview 에 적힌 만큼만 씁니다. '같은 동네'·'같은 길'은 두 주소에 같은 읍·면·동이나
+  도로 이름이 실제로 있을 때만 씁니다. 번지·도로명 번호는 옮겨 쓰지 마세요.
+- **장소 사이의 거리·이동 시간·'가깝다'는 말은 쓰지 마세요.** 입력에 거리가 없습니다.
+  주소·overview 에 없는 해안·산간 같은 지형 말과 '이동 없이' 같은 과장도 쓰지 마세요.
+
+문구:
+- 모든 문구(reason·intro·summary)는 '~합니다'체로 씁니다.
+- 관심사·여행 스타일 이름("하천·해양", "전시 시설")은 그대로 옮기지 말고 그 장소에 맞게 풀어 씁니다.
+- 동행(친구·연인·가족·단체·혼자)은 넣더라도 **하루에 한 장소의 이유까지**,
+  하루 요약에도 한 번까지입니다.
+- reasons — places 의 **content_id 마다 하나씩.** reason 은 그 장소의 이름을 넣어
+  **70~150자**로 씁니다. 문장 수는 자유입니다.
+  reason 은 장소 소개가 아니라 **이 여행자에게 왜 이곳인지**입니다.
+  이 장소의 구체적인 점 하나(분류·overview 에 있는 것)를 골라, 그것이 이 여행자의 조건에
+  왜 좋은지를 씁니다. 조건은 taste 가 관심사 이름이면 그 관심사, "비슷한 취향(…)"이면
+  괄호 안의 분야, "취향 밖"이면 여행 스타일이나 장소의 성격입니다.
+  overview 의 사실을 여러 개 늘어놓지 말고, 조건과 이어지는 것 하나만 고릅니다.
+  왜 좋은지는 고른 사실에서 따라 나오는 말로 씁니다. 그 사실을 지우면 성립하지 않는 평가여야
+  합니다. 첫 장소·마무리·시작점처럼 일정 속 자리는 이유가 아닙니다.
+  관심사 이름을 문장에 넣을 필요는 없습니다 — 내용이 관심사에 답하면 됩니다.
+  trip 에 없는 관심사(예: 고르지 않은 '지질')를 지어내지 마세요.
+  여행 스타일은 그 뜻 그대로만 씁니다. 머무는 시간이 길다고 "여유롭게"라고 쓰지 말고,
+  "효율적으로"인 여행에 "여유 있게"·"넉넉하게"를 쓰지 마세요.
+  도는 순서·이동은 하루 요약이 씁니다 — 이유에는 쓰지 마세요.
+  모든 이유가 같은 모양이 되지 않게 시작과 끝맺음을 바꿔 가며 씁니다. 특히 아래 틀은 쓰지 마세요:
+    - "~에 관심 있는 여행자라면", "~하는 여행이라면"처럼 조건을 문장 앞에 붙이는 시작
+    - "~할 수 있습니다", "~곳입니다"로 끝나는 이유를 잇달아 쓰는 것
+    - "○○에게 알맞습니다", "○○에게 추천합니다"처럼 대상을 정하는 끝맺음
+- title — **15자 이내.** 지역과 여행의 성격이 드러나게 (예: "경주 역사 여행").
+  날짜·일수는 넣지 마세요 — 표지에 따로 적힙니다.
+- intro — 여행을 소개하는 한 문장.
+- days — days 의 **모든 day 번호마다 하나씩.** summary 는 100~300자로,
+  그날 도는 순서(장소 이름과 오전·오후)와 각 곳의 특징,
+  같은 동네로 묶인 곳이 있으면 그 묶음을 씁니다."""
+
+
+def write_all(
+    plan: list[PlanItem],
+    candidates: list[Candidate],
+    *,
+    start: date,
+    day_count: int,
+    conditions: dict,
+    trip: TripRequest,
+) -> WriterDraft:
+    """
+    **글쓰기(write).** 배치가 끝난 일정(plan)을 받아 문구를 쓴다.
+
+    candidates 는 plan 의 content_id 로 이름·분류·주소·overview 를 찾는 데만 쓴다.
+    conditions·trip 은 llm_arrange.arrange_all 과 같다 (모델에게 보낼 조건 · 기록용).
+    """
+    mode = llm_client.llm_mode()
+    started = time.monotonic()
+    try:
+        if mode == "fake":
+            draft = fake_llm.write_all(
+                plan,
+                candidates,
+                start=start,
+                day_count=day_count,
+                conditions=conditions,
+            )
+        else:
+            payload = _plan_to_payload(
+                plan, candidates, start, day_count, conditions, trip.detail_codes
+            )
+            if vllm_client.write_backend() == "vllm":
+                draft = _vllm_write_all(payload, trip)
+            else:
+                draft = _claude_write_all(llm_client.model_name(), payload, trip)
+    except LLMError as exc:
+        exc.stage = "write"
+        raise
+    finally:
+        elapsed = time.monotonic() - started
+        metrics.LLM_CALL_DURATION.labels(llm_mode=mode).observe(elapsed)
+
+    # 마지막 모델 응답이다. 검사부터가 후처리다 (클라우드팀 합의: 응답 검사 · 응답 조립 · HTML 생성)
+    metrics.mark_llm_done()
+
+    try:
+        _validate_days(draft.days, day_count)
+        _validate_reasons(draft.reasons, plan)
+    except LLMError as exc:
+        raise LLMError(str(exc), kind="validation", stage="write") from exc
+    return draft
+
+
+def _plan_to_payload(
+    plan: list[PlanItem],
+    candidates: list[Candidate],
+    start: date,
+    day_count: int,
+    conditions: dict,
+    detail_codes: list[str],
+) -> str:
+    """
+    배치된 곳만 날짜별로 묶어 JSON 으로 만든다. 모양은 v7 학습 데이터의 입력과 같다.
+    detail_codes 는 여행자가 고른 취향 코드 — 장소마다 taste 를 매기는 데 쓴다.
+    """
+    by_id = {candidate.content_id: candidate for candidate in candidates}
+
+    days = []
+    for day in range(1, day_count + 1):
+        # plan 은 nodes.number_by_time 이 일차·차례 순으로 세워 두었다
+        places = [
+            _place_entry(item, by_id[item.content_id], detail_codes)
+            for item in plan
+            if item.day == day
+        ]
+        days.append(
+            {
+                "day": day,
+                "date": (start + timedelta(days=day - 1)).isoformat(),
+                "places": places,
+            }
+        )
+
+    payload = {"trip": conditions, "days": days}
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _place_entry(item: PlanItem, candidate: Candidate, detail_codes: list[str]) -> dict:
+    """
+    배치된 곳 한 줄. 칸과 순서를 v7 학습 데이터의 입력과 같게 둔다 — 글쓰기를 자체 모델로
+    바꿀 때 학습 때와 같은 모양을 보이려고. 배치의 fit 대신 taste 를 넣는다.
+    """
+    shown = llm_arrange.candidate_entry(candidate)
+    entry = {
+        "content_id": shown["content_id"],
+        "name": shown["name"],
+        "category": shown["category"],
+        "address": shown["address"],
+        "kind": shown["kind"],
+        "taste": taste_label(candidate.category_code, detail_codes),
+        "start_time": item.start_time,
+        "duration_minutes": item.duration_minutes,
+        "overview": _cut_overview(candidate.overview),
+    }
+    if candidate.pick == "event":
+        entry["event_start_date"] = shown["event_start_date"]
+        entry["event_end_date"] = shown["event_end_date"]
+    return entry
+
+
+def taste_label(category_code: str, detail_codes: list[str]) -> str:
+    """
+    장소가 여행자의 어느 취향에 닿는지를 v7 학습 데이터의 taste 와 같은 말로.
+        고른 중분류  → 그 관심사 이름 ("역사 유적지")
+        같은 대분류  → "비슷한 취향(역사)"
+        그 밖       → "취향 밖"
+
+    배치의 fit 은 「관심사인가」만 알려 준다. 글쓰기는 **어느** 관심사와 이을지가 필요하다.
+    고르는 규칙은 nodes.prepare · find_places 와 같다 — 도시공원(EXTRA_LCLS2)은 관심사로만
+    잡고, 대분류 넓히기에는 1:1 표만 쓴다. 행사도 같은 규칙이다 (v7 도 그렇다).
+    """
+    known_codes = [code for code in detail_codes if code in data.DETAIL_TO_LCLS2]
+    for code in known_codes:
+        matched = [data.DETAIL_TO_LCLS2[code], *data.EXTRA_LCLS2.get(code, [])]
+        if category_code in matched:
+            return data.preference_label(code)
+
+    families = {data.DETAIL_TO_LCLS2[code][:2] for code in known_codes}
+    family = category_code[:2]
+    if family in families:
+        theme = data.preference_label(data.FAMILY_THEMES[family])
+        return f"비슷한 취향({theme})"
+    return "취향 밖"
+
+
+def _cut_overview(overview: str) -> str:
+    """앞 200자로 자르되, 그 안에 마침표가 있으면 그 문장까지 (100자 이상일 때)."""
+    flattened = re.sub(r"\s+", " ", overview).strip()
+    head = flattened[:OVERVIEW_MAX_CHARS]
+    last_period = head.rfind(".")
+    if last_period >= OVERVIEW_MIN_SENTENCE_CHARS:
+        return head[: last_period + 1]
+    return head
+
+
+def _validate_days(days: list[DayDraft], day_count: int) -> None:
+    """
+    하루 요약이 1~day_count 일차를 **한 번씩** 담았나.
+
+    빠지거나 겹치면 가이드북 일차 지면이 비거나 엉뚱한 날에 붙는다. 제목 길이는 여기서
+    보지 않는다 — 넘치면 서버가 자른다 (사실 오류가 아니라 작업을 멈출 일이 아니다).
+    """
+    returned = sorted(day.day for day in days)
+    expected = list(range(1, day_count + 1))
+    if returned != expected:
+        raise LLMError(
+            f"하루 요약의 일차가 {returned} 입니다 (1~{day_count} 일차가 한 번씩이어야 함)"
+        )
+
+
+def _validate_reasons(reasons: list[Reason], plan: list[PlanItem]) -> None:
+    """
+    추천 이유가 배치된 곳마다 **한 번씩** 있나.
+
+    빠지면 그 장소의 이유 칸이 비고, 배치에 없는 곳의 이유는 붙일 자리가 없다.
+    """
+    returned = sorted(reason.content_id for reason in reasons)
+    expected = sorted(item.content_id for item in plan)
+    if returned != expected:
+        raise LLMError(
+            f"추천 이유의 장소가 배치와 다릅니다 (받음 {returned} · 배치 {expected})"
+        )
+
+
+def _claude_write_all(model: str, payload: str, trip: TripRequest) -> WriterDraft:
+    """실제 Claude 를 1회 호출한다. [비용 발생]"""
+    request = {
+        "stage": "write",  # 한 작업에 호출이 둘이라 기록에서 가른다
+        "trip": trip.model_dump(),  # 기록용
+        "system": SYSTEM_PROMPT,
+        "plan": json.loads(payload),
+    }
+    return llm_client.call_and_record(
+        model, SYSTEM_PROMPT, payload, WriterDraft, WRITE_TIMEOUT, request
+    )
+
+
+def _vllm_write_all(payload: str, trip: TripRequest) -> WriterDraft:
+    """
+    런팟 vLLM(자체 모델)을 1회 호출한다. 지시문은 VLLM_PROMPT 로 고른다 —
+    v7(기본, 모델이 학습한 그대로) 또는 claude(위 SYSTEM_PROMPT).
+    """
+    if vllm_client.prompt_choice() == "claude":
+        system = SYSTEM_PROMPT
+    else:
+        system = v7_prompt.SYSTEM_PROMPT
+    request = {
+        "stage": "write",
+        "backend": "vllm",  # 기록에서 Claude 글쓰기와 가르려고
+        "prompt": vllm_client.prompt_choice(),
+        "trip": trip.model_dump(),
+        "system": system,
+        "plan": json.loads(payload),
+    }
+    return vllm_client.call_and_record(
+        system, payload, WriterDraft, VLLM_WRITE_TIMEOUT, request
+    )

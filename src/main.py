@@ -29,15 +29,16 @@ from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src import logs, metrics
-from src.llm import calllog, fake_llm, llm_plan
+from src.llm import calllog, fake_llm, llm_client, vllm_client
 from src.server import adapter, jobs
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 설정이 틀렸으면 첫 요청에서야 실패한다. 켜기 전에 막는다
-    mode = llm_plan.llm_mode()  # real or fake
+    mode = llm_client.llm_mode()  # real or fake
     save = calllog.save_mode()  # True or False (ON or OFF)
+    write_backend = vllm_client.write_backend()  # claude or vllm (글쓰기만)
     if mode == "fake":
         # 운영 서버에서 부하 테스트를 한다. 가짜로 켜진 걸 모르고 지나가면 안 된다
         logs.write(
@@ -50,12 +51,20 @@ async def lifespan(app: FastAPI):
             delay_sec=fake_llm.delay_seconds(),
         )
     else:
-        llm_plan.load_api_key(llm_plan.ANTHROPIC_KEY_VAR)
+        llm_client.load_api_key(llm_client.ANTHROPIC_KEY_VAR)  # 배치는 늘 Claude
+        if write_backend == "vllm":
+            vllm_client.check_settings()
     metrics.LLM_MODE.labels(llm_mode=mode).set(1)
 
     # 기록이 켜졌는지는 여기서 본다 (서버는 OFF 여야 한다)
     save_label = "ON" if save else "OFF"
-    logs.write("INFO", "server_start", llm_mode=mode, save_mode=save_label)
+    logs.write(
+        "INFO",
+        "server_start",
+        llm_mode=mode,
+        save_mode=save_label,
+        write_backend=write_backend,
+    )
 
     workers = jobs.start()  # 큐 생성 + 워커 3개
 
@@ -142,7 +151,7 @@ async def health() -> dict:
     """
     return {
         "status": "ok",
-        "llm_mode": llm_plan.llm_mode(),
+        "llm_mode": llm_client.llm_mode(),
         "jobs": len(jobs.jobs),
         "queue_size": jobs.job_queue.qsize(),
         "running": jobs.running_count(),
@@ -170,7 +179,7 @@ async def create_generation(payload: dict) -> dict:
     pydantic 에 맡기면 전부 한 가지 검증 오류로 뭉쳐 온다.
     그래서 검증은 adapter 가 항목별로 한다.
 
-    엔드포인트 넷이 모두 async def 인 이유: def 면 FastAPI 가 스레드 여러 개에서 동시에
+    엔드포인트가 모두 async def 인 이유: def 면 FastAPI 가 스레드 여러 개에서 동시에
     돌린다. 그러면 같은 request_id 두 개가 existing() 을 함께 통과해 작업이 둘 생기고
     (= 두 번 과금), 이벤트 루프 전용인 asyncio.Queue 를 다른 스레드가 만지게 된다.
     async def 는 이벤트 루프 하나에서 await 없이 끝까지 도므로 끼어들 틈이 없다.
@@ -217,6 +226,59 @@ async def create_generation(payload: dict) -> dict:
         ) from None
 
     return _envelope("guidebook_accepted", jobs.accepted(job))
+
+
+@app.post("/guidebooks-generations/{job_id}/regenerate", status_code=202)
+async def regenerate(job_id: str, payload: dict) -> dict:
+    """
+    완료된 작업(job_id)에 피드백을 주어 새 작업을 만든다. 결과는 새 job_id 로 조회한다.
+
+    검사 순서는 create_generation 과 같다. 같은 request_id 를 원래 작업보다 먼저 보는 이유 —
+    응답이 유실돼 다시 왔을 때 그사이 원래 작업이 지워졌어도 이미 만든 작업을 돌려주려고.
+    """
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        raise HTTPException(400, detail="invalid_request")
+
+    # 원래 job_id 도 지문에 넣는다 — 같은 request_id 로 다른 작업을 재생성하면 409
+    mark = jobs.fingerprint({"source_job_id": job_id, **payload})
+    try:
+        already = jobs.existing(request_id, mark)
+    except jobs.RequestIdConflict:
+        raise HTTPException(409, detail="request_id_conflict") from None
+    if already is not None:
+        return _envelope("regenerate_accepted", jobs.accepted(already))
+
+    try:
+        feedback, title = adapter.to_feedback(payload)
+    except adapter.InputError as exc:
+        logs.write(
+            "WARNING",
+            "request_rejected",
+            request_id=request_id,
+            code=exc.code,
+            reason=exc.reason,
+        )
+        raise HTTPException(400, detail=exc.code) from exc
+
+    source = jobs.jobs.get(job_id)
+    if source is None:  # 24시간이 지났거나 서버가 재시작됐다
+        raise HTTPException(404, detail="regenerate_unavailable")
+    if source["status"] != "completed":
+        raise HTTPException(409, detail="invalid_state")
+
+    try:
+        job = jobs.accept_regeneration(
+            source, feedback, title, request_id, mark, payload
+        )
+    except asyncio.QueueFull:
+        metrics.JOBS_TOTAL.labels(result="rejected").inc()
+        logs.write("WARNING", "queue_full", request_id=request_id)
+        raise HTTPException(
+            503, detail="service_unavailable", headers={"Retry-After": "60"}
+        ) from None
+
+    return _envelope("regenerate_accepted", jobs.accepted(job))
 
 
 @app.get("/guidebooks-generations/{job_id}")
