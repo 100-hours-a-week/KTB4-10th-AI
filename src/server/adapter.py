@@ -296,6 +296,8 @@ def to_response(trip: TripRequest, itinerary: Itinerary) -> dict:
     return {
         "title": _title(itinerary),
         "summary": itinerary.intro,
+        # 가이드북 표지와 같은 사진 (nodes._pick_cover). 사진 있는 곳이 하나도 없으면 None
+        "thumbnail_url": itinerary.cover_image_url,
         "content_html": book_html.render(trip, itinerary),
         "itinerary": [
             {
