@@ -1,3 +1,4 @@
+# ruff: noqa: E501  — 코랩 실행 예시·한글 설명 줄이 길다
 """
 model/eval_kanana.py — 코랩(A100 40GB)에서 돈다. 레포를 import 하지 않는다.
 
@@ -34,28 +35,54 @@ rows = [json.loads(line) for line in open("eval_inputs.jsonl", encoding="utf-8")
 schema = rows[0]["schema"]
 try:  # vLLM 0.11 부터 structured_outputs
     from vllm.sampling_params import StructuredOutputsParams
+
     guided = {"structured_outputs": StructuredOutputsParams(json=schema)}
 except ImportError:
     from vllm.sampling_params import GuidedDecodingParams
+
     guided = {"guided_decoding": GuidedDecodingParams(json=schema)}
 
-llm = LLM(BASE, enable_lora=True, max_lora_rank=16, max_model_len=12288, gpu_memory_utilization=0.9)
-messages = [[{"role": "system", "content": r["system"]}, {"role": "user", "content": r["user"]}] for r in rows]
+llm = LLM(
+    BASE,
+    enable_lora=True,
+    max_lora_rank=16,
+    max_model_len=12288,
+    gpu_memory_utilization=0.9,
+)
+messages = [
+    [{"role": "system", "content": r["system"]}, {"role": "user", "content": r["user"]}]
+    for r in rows
+]
 
 # 학습 때 문제지 틀(train_qlora.build_text)과 같게 enable_thinking=False
 lora = LoRARequest("writer", 1, ADAPTER)
-runs = [(f"lora_fp{p}", lora, p) for p in PENALTIES] or [("base", None, 0.0), ("lora", lora, 0.0)]
+runs = [(f"lora_fp{p}", lora, p) for p in PENALTIES] or [
+    ("base", None, 0.0),
+    ("lora", lora, 0.0),
+]
 for name, lora, penalty in runs:
-    params = SamplingParams(temperature=0, frequency_penalty=penalty, max_tokens=4096, **guided)
+    params = SamplingParams(
+        temperature=0, frequency_penalty=penalty, max_tokens=4096, **guided
+    )
     began = time.monotonic()
-    outputs = llm.chat(messages, params, lora_request=lora, chat_template_kwargs={"enable_thinking": False})
+    outputs = llm.chat(
+        messages,
+        params,
+        lora_request=lora,
+        chat_template_kwargs={"enable_thinking": False},
+    )
     seconds = round((time.monotonic() - began) / len(rows), 2)
 
     out = f"/content/eval_{name}.jsonl"
     with open(out, "w", encoding="utf-8") as f:
         for r, o in zip(rows, outputs):
-            row = {"request_id": r["request_id"], "model": f"kanana-{name}", "text": o.outputs[0].text,
-                   "seconds": seconds, "output_tokens": len(o.outputs[0].token_ids)}
+            row = {
+                "request_id": r["request_id"],
+                "model": f"kanana-{name}",
+                "text": o.outputs[0].text,
+                "seconds": seconds,
+                "output_tokens": len(o.outputs[0].token_ids),
+            }
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     shutil.copy(out, os.path.dirname(ADAPTER.rstrip("/")))
     print(f"{name} 끝 (요청당 {seconds}초) → {out}")

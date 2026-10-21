@@ -1,3 +1,4 @@
+# ruff: noqa: E501  — 코랩 실행 예시·한글 설명 줄이 길다
 """
 model/train_qlora.py
 
@@ -43,7 +44,9 @@ def load_rows(path: Path) -> list[dict]:
         for line in fp:
             if not line.strip():
                 continue
-            system, user, assistant = (m["content"] for m in json.loads(line)["messages"])
+            system, user, assistant = (
+                m["content"] for m in json.loads(line)["messages"]
+            )
             rows.append({"system": system, "prompt": user, "completion": assistant})
     return rows
 
@@ -114,7 +117,9 @@ def collate(batch: list[dict], pad_id: int) -> dict:
 
 def check_lengths(tok, rows: list[dict], max_len: int) -> None:
     """자르면 정답 뒷부분과 EOS가 통째로 날아간다. 학습 전에 확인한다."""
-    lens = sorted(sum(len(x) for x in encode(tok, r)) for r in rows)  # 문제지+정답 토큰 수
+    lens = sorted(
+        sum(len(x) for x in encode(tok, r)) for r in rows
+    )  # 문제지+정답 토큰 수
     n = len(lens)
     over = sum(1 for x in lens if x > max_len)
     print(
@@ -263,7 +268,7 @@ def parse_args():
     ap.add_argument(
         "--quant",
         default="none",
-        choices=("none", "4bit"),-
+        choices=("none", "4bit"),
         help="4bit는 작은 GPU용. 푸는 비용이 매 스텝 붙어 2~3배 느리다",
     )
     ap.add_argument(

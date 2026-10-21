@@ -1,3 +1,4 @@
+# ruff: noqa: E501  — 코랩 실행 예시·한글 설명 줄이 길다
 """
 model/label_qwen.py — 코랩(A100 40GB)에서 돈다. 레포를 import 하지 않는다.
 
@@ -23,7 +24,9 @@ import time
 from vllm import LLM, SamplingParams
 
 MODEL = "Qwen/Qwen3-32B-AWQ"
-N = int(sys.argv[3]) if len(sys.argv) > 3 else 4  # 요청마다 뽑는 답 수 (10/9 v6 생성은 8)
+N = (
+    int(sys.argv[3]) if len(sys.argv) > 3 else 4
+)  # 요청마다 뽑는 답 수 (10/9 v6 생성은 8)
 CHUNK = 100
 OUT = "/content/label_outputs.jsonl"
 BACKUP = sys.argv[1] if len(sys.argv) > 1 else None
@@ -39,9 +42,11 @@ print(f"전체 {len(rows)} · 끝난 것 {len(done)} · 남은 것 {len(todo)}")
 schema = rows[0]["schema"]
 try:  # vLLM 0.11 부터 structured_outputs
     from vllm.sampling_params import StructuredOutputsParams
+
     guided = {"structured_outputs": StructuredOutputsParams(json=schema)}
 except ImportError:
     from vllm.sampling_params import GuidedDecodingParams
+
     guided = {"guided_decoding": GuidedDecodingParams(json=schema)}
 
 # Qwen 권장값(비사고 모드): temperature 0.7, top_p 0.8
@@ -49,17 +54,31 @@ params = SamplingParams(n=N, temperature=0.7, top_p=0.8, max_tokens=8000, **guid
 llm = LLM(MODEL, max_model_len=16384, gpu_memory_utilization=0.92)
 
 for start in range(0, len(todo), CHUNK):
-    chunk = todo[start:start + CHUNK]
-    messages = [[{"role": "system", "content": r["system"]}, {"role": "user", "content": r["user"]}] for r in chunk]
+    chunk = todo[start : start + CHUNK]
+    messages = [
+        [
+            {"role": "system", "content": r["system"]},
+            {"role": "user", "content": r["user"]},
+        ]
+        for r in chunk
+    ]
     began = time.monotonic()
-    outputs = llm.chat(messages, params, chat_template_kwargs={"enable_thinking": False})
+    outputs = llm.chat(
+        messages, params, chat_template_kwargs={"enable_thinking": False}
+    )
     seconds = round((time.monotonic() - began) / len(chunk), 1)
 
     with open(OUT, "a", encoding="utf-8") as f:
         for r, o in zip(chunk, outputs):
             for i, sample in enumerate(o.outputs):
-                row = {"request_id": r["request_id"], "sample": i, "model": MODEL, "text": sample.text,
-                       "seconds": seconds, "output_tokens": len(sample.token_ids)}
+                row = {
+                    "request_id": r["request_id"],
+                    "sample": i,
+                    "model": MODEL,
+                    "text": sample.text,
+                    "seconds": seconds,
+                    "output_tokens": len(sample.token_ids),
+                }
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
     if BACKUP:
         os.makedirs(BACKUP, exist_ok=True)
