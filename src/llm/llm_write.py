@@ -131,7 +131,11 @@ def write_all(
             payload = _plan_to_payload(
                 plan, candidates, start, day_count, conditions, trip.detail_codes
             )
-            if vllm_client.write_backend() == "vllm":
+            # vllm 이어도 워커가 없으면 Claude 로 쓴다 — vLLM 을 정한 시간대에만 켜 둔다
+            use_vllm = (
+                vllm_client.write_backend() == "vllm" and vllm_client.worker_ready()
+            )
+            if use_vllm:
                 draft = _vllm_write_all(payload, trip)
             else:
                 draft = _claude_write_all(llm_client.model_name(), payload, trip)
