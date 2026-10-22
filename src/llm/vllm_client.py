@@ -1,25 +1,31 @@
 """
 src/llm/vllm_client.py
 
-**런팟 Pod 의 vLLM(자체 모델)을 부르는 부품.** 글쓰기(llm_write)만 쓴다 — 배치는 Claude (#41).
+**런팟 서버리스 vLLM(자체 모델)을 부르는 부품.** 글쓰기(llm_write)만 쓴다 — 배치는 Claude (#41).
 
 vLLM 은 OpenAI 와 같은 모양의 API 를 열어 주므로 openai SDK 로 부른다. 모양을 llm_client 의
 Claude 호출(call_and_record · claude_call)과 나란히 맞춰 두었다 — 하나를 읽으면 다른 하나도
 읽히게. 실패 이름(kind)도 같은 것을 써서 로그·/metrics 를 그대로 읽는다.
 
+vllm 이어도 글쓰기 직전에 워커가 켜져 있는지 묻고(worker_ready), 없으면 Claude 로 쓴다.
+vLLM 은 정한 시간대에만 켜 두고(런팟 Active Workers) 나머지는 Claude 로 돌리려고 (2026-10-22).
+
 설정은 환경변수가 먼저, 없으면 .env (llm_client.load_api_key 와 같은 방식):
-    LLM_WRITE_BACKEND  글쓰기를 누가 하나. claude(비우면) · vllm
-    VLLM_BASE_URL      예: https://<pod-id>-8000.proxy.runpod.net/v1
-    VLLM_API_KEY       vLLM 의 --api-key. 키 없이 띄웠으면 아무 값
+    LLM_WRITE_BACKEND  글쓰기를 누가 하나. claude(비우면) · vllm(워커가 있을 때만)
+    VLLM_BASE_URL      예: https://api.runpod.ai/v2/<endpoint-id>/openai/v1
+    VLLM_API_KEY       런팟 API 키 (Pod 로 띄웠으면 vLLM 의 --api-key)
     VLLM_MODEL         vLLM 의 --served-model-name (/v1/models 에 나오는 이름)
     VLLM_PROMPT        vLLM 에 보낼 지시문. v7(비우면) · claude
 """
 
 from __future__ import annotations
 
+import json
 import os
 import time
+import urllib.request
 
+from src import logs
 from src.llm import calllog, llm_client
 from src.llm.llm_client import LLMError
 
@@ -39,6 +45,11 @@ MAX_TOKENS = 4096
 # 느린 건 GPU 속도 탓이라 시간 초과를 다시 불러도 또 넘는다. SDK 는 연결 오류와 시간 초과를
 # 같은 횟수로 재시도해서, 연결 오류 재시도도 함께 포기한다
 VLLM_MAX_RETRIES = 0
+
+# /health 를 기다리는 상한. 이보다 늦으면 준비 안 된 것으로 보고 Claude 로 쓴다
+HEALTH_TIMEOUT = 5
+# /models 를 기다리는 상한. 켜진 워커는 1~2초에 답했고, 켜는 중에는 5초 안에 답이 없었다 (10-22)
+MODELS_TIMEOUT = 5
 
 
 def write_backend() -> str:
@@ -83,6 +94,69 @@ def check_settings() -> None:
     for var in (BASE_URL_VAR, API_KEY_VAR, MODEL_VAR):
         # 키가 아닌 값도 같은 방식(환경변수 → .env)으로 읽는다
         llm_client.load_api_key(var)
+
+
+def worker_ready() -> bool:
+    """
+    런팟 서버리스에 지금 글쓰기를 받을 워커가 있나. 없거나 확인이 실패하면 False.
+
+    두 단계로 묻는다.
+        1. /health — 워커가 켜졌나 (running). 워커를 깨우지 않는다
+        2. /models — 켜졌으면 실제로 답하나. 켜는 중(모델을 올리는 약 2분 30초)과
+           켜짐은 /health 로는 똑같이 보인다
+    /models 를 먼저 묻지 않는 이유: 꺼진 워커를 깨워 콜드 스타트와 과금이 생긴다.
+    """
+    base_url = llm_client.load_api_key(BASE_URL_VAR)
+    api_key = llm_client.load_api_key(API_KEY_VAR)
+
+    try:
+        health = _get_json(health_url(base_url), api_key, HEALTH_TIMEOUT)
+    # 연결 실패·시간 초과·HTTP 오류(OSError)와 깨진 JSON(ValueError)
+    except (OSError, ValueError) as exc:
+        logs.write("WARNING", "vllm_not_ready", reason="health_failed", error=str(exc))
+        return False
+    if not is_ready(health):
+        logs.write("INFO", "vllm_not_ready", reason="no_worker", health=health)
+        return False
+
+    # 켜는 중이면 답이 없다. 우리가 끊어도 런팟 대기열에는 남아, 다음 요청의 확인에서
+    # is_ready 의 「대기열이 쌓였는데 처리 중 0」으로 걸린다
+    try:
+        _get_json(f"{base_url.rstrip('/')}/models", api_key, MODELS_TIMEOUT)
+    except (OSError, ValueError) as exc:
+        logs.write("INFO", "vllm_not_ready", reason="worker_starting", error=str(exc))
+        return False
+    return True
+
+
+def _get_json(url: str, api_key: str, timeout: int) -> dict:
+    """GET 해서 JSON 으로 읽는다. /health 와 /models 가 같은 모양이라 함께 쓴다."""
+    request = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {api_key}"}
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.load(response)
+
+
+def health_url(base_url: str) -> str:
+    """서버리스 주소 .../v2/<id>/openai/v1 → .../v2/<id>/health"""
+    root = base_url.rstrip("/").removesuffix("/openai/v1")
+    return f"{root}/health"
+
+
+def is_ready(health: dict) -> bool:
+    """
+    /health 응답으로 판단한다 (2026-10-22 관찰).
+        꺼짐    running 0 (idle·ready 는 꺼져 있어도 1 이라 보지 않는다)
+        켜는 중  running 1 — 켜짐과 같다. 대기열이 쌓였는데 처리 중이 0 이면 켜는 중으로 본다.
+                대기열이 비었으면 여기서는 못 가른다 → worker_ready 의 /models 가 가른다
+        켜짐    running 1
+    """
+    workers = health.get("workers", {})
+    jobs = health.get("jobs", {})
+    running = workers.get("running", 0)
+    queue_stuck = jobs.get("inQueue", 0) > 0 and jobs.get("inProgress", 0) == 0
+    return running >= 1 and not queue_stuck
 
 
 def call_and_record(
