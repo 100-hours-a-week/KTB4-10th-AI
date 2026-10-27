@@ -146,7 +146,7 @@ def _glance(itinerary: Itinerary) -> str:
         )
         rows.append(
             f'<div class="gday"><div class="h">DAY {day.day}'
-            f"<small>{_text(day.date)}</small></div>"
+            f"<small>{_month_day(day.date)}</small></div>"
             f'<div class="chain">{stops}</div></div>'
         )
 
@@ -180,16 +180,16 @@ def _place(day: ItineraryDay, place: PlannedPlace) -> str:
         photo = '<div class="photo noimg">사진 없음</div>'
 
     when = f"{place.start_time} · {place.duration_minutes}분"
-    category = place.category_path or place.category_name
-    event = ""
+    category = _text(place.category_path or place.category_name)
     if place.event_end_date:
-        event = f'<div class="info">행사 · {_month_day(place.event_end_date)}까지</div>'
+        # 따로 한 줄을 두면 긴 행사 이름(제목 2줄)과 겹쳐 쪽이 넘친다
+        category += f" · 행사 {_month_day(place.event_end_date)}까지"
 
     return (
         f'{photo}<div class="pad"><span class="badge">DAY {day.day} · {_text(when)}</span>'
         f"<h3>{_text(place.name)}</h3>"
-        f'<div class="info">{_text(category)}</div>'
-        f'<div class="info">{_text(place.address)}</div>{event}'
+        f'<div class="info">{category}</div>'
+        f'<div class="info">{_text(place.address)}</div>'
         f'<div class="why"><b>WHY HERE</b>{_text(place.recommend_reason)}</div></div>'
     )
 
@@ -199,8 +199,8 @@ def _events(events: list[MissedEvent]) -> str:
     rows = "".join(
         f'<div class="ev"><div class="th"{_bg(event.image_url)}></div><div>'
         f'<div class="nm">{_text(event.name)}</div>'
-        f'<div class="sm">{_event_period(event.start_date, event.end_date)}</div>'
-        f'<div class="sm">{_text(event.address)}</div></div></div>'
+        f'<div class="sm">{_event_period(event.start_date, event.end_date)}'
+        f" · {_text(event.address)}</div></div></div>"
         for event in events[:MAX_EVENTS_ON_PAGE]
     )
     hidden = len(events) - MAX_EVENTS_ON_PAGE
@@ -235,6 +235,9 @@ def _text(value: str | None) -> str:
 def _bg(url: str | None) -> str:
     if not url:
         return ""
+    # https 페이지에서 http 사진은 혼합 콘텐츠로 막힌다 (FE #167). TourAPI 는 https 로도 열린다
+    if url.startswith("http://"):
+        url = "https://" + url[len("http://") :]
     return f" style=\"background-image:url('{escape(url)}')\""
 
 
@@ -430,33 +433,47 @@ h2 { font-size:24px; margin:6px 0 18px; line-height:1.3; }
   display:flex;
   justify-content:space-between;
   gap:12px;
-  padding:12px 0;
+  padding:7px 0;
   border-bottom:1px solid var(--soft);
-  font-size:15px;
+  font-size:13.5px;
 }
 .toc .d { font-weight:800; color:var(--accent); min-width:56px; }
-.toc .t { flex:1; } .toc .n { color:var(--faint); font-size:13px; }
+.toc .t { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.toc .n { color:var(--faint); font-size:13px; }
 
-/* 한눈에 보기 */
-.glance { display:flex; flex-direction:column; gap:18px; }
+/* 한눈에 보기. 7일 x 5곳도 한 쪽에 들어가게 날짜를 왼쪽에 두고, 긴 이름은 "…" 로 줄인다 */
+.glance { display:flex; flex-direction:column; gap:8px; }
+.gday { display:flex; gap:12px; padding-bottom:8px; border-bottom:1px solid var(--soft); }
 .gday .h {
+  flex:0 0 58px;
   font-weight:800;
   font-size:15px;
+  line-height:1.3;
 }
 .gday .h small {
+  display:block;
+  margin-top:2px;
   color:var(--sub);
   font-weight:500;
-  margin-left:6px;
+  font-size:12px;
 }
 .chain {
   display:flex;
   flex-wrap:wrap;
   align-items:center;
-  gap:6px;
-  margin-top:6px;
-  font-size:13px;
+  gap:4px 3px;
+  font-size:12px;
+  line-height:1.5;
 }
-.chain span { background:var(--soft); padding:3px 10px; border-radius:999px; }
+.chain span {
+  background:var(--soft);
+  padding:1px 8px;
+  border-radius:999px;
+  white-space:nowrap;
+  max-width:160px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
 .chain i { color:var(--faint); font-style:normal; }
 
 /* 챕터 */
@@ -511,9 +528,12 @@ h2 { font-size:24px; margin:6px 0 18px; line-height:1.3; }
 }
 
 /* 행사 */
-.ev { display:flex; gap:14px; padding:14px 0; border-bottom:1px solid var(--soft); }
-.ev .th { flex:0 0 84px; height:84px; border-radius:6px; background:var(--soft) center/cover; }
-.ev .nm { font-weight:700; font-size:15px; } .ev .sm { font-size:12px; color:var(--sub); }
+/* 8건이 한 쪽에 들어가게 한 건을 두 줄로 */
+.ev { display:flex; gap:10px; padding:8px 0; border-bottom:1px solid var(--soft); }
+.ev .th { flex:0 0 44px; height:44px; border-radius:6px; background:var(--soft) center/cover; }
+.ev > div:last-child { min-width:0; }
+.ev .nm, .ev .sm { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ev .nm { font-weight:700; font-size:14px; } .ev .sm { font-size:12px; color:var(--sub); }
 .note { font-size:12px; color:var(--faint); margin-top:14px; }
 
 /* 뒷표지 */
@@ -528,42 +548,26 @@ h2 { font-size:24px; margin:6px 0 18px; line-height:1.3; }
 .back .logo { font-size:40px; font-weight:900; color:#fff; letter-spacing:.06em; }
 .back p { font-size:12px; line-height:1.8; margin:6px 0; }
 
-/* PDF(A4). 하루가 A4 한 장 — 챕터(사진·요약)와 그날 장소들을 한 쪽에 모은다.
-   화면의 "장소 한 곳 = 한 쪽"을 그대로 인쇄하면 사진이 A4 폭으로 커져 쪽마다 절반이 빈다 */
+/* PDF. 화면과 같은 CSS 를 쓰고, 여기서는 종이 크기 · 쪽 나눔 · 잘림 방지만 정한다.
+   종이 한 장 = 화면의 한 쪽 (520 x 746px ≈ 표지 비율 3:4.3, 표지 745.3px 가 넘치지 않게 올림) */
 @media print {
-  @page { size:A4; margin:10mm 12mm; }
+  @page { size:520px 746px; margin:0; }
   * { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-  body { background:#fff; font-size:13px; }
-  .book { max-width:none; padding:0; gap:0; display:block; height:auto; overflow:visible; }
-  .page { box-shadow:none; border-radius:0; overflow:visible; width:auto; height:auto; }
+  body { background:var(--paper); }
   .nav { display:none; }
-  .pad { padding:12px 4px; }
-  .pno { display:none; }
-  .page.cover, .page.back { break-before:page; height:277mm; aspect-ratio:auto; border-radius:0; }
-  .page.cover { break-before:auto; }
-  .page.back { display:flex; align-items:center; justify-content:center; }
-  .page.info, .page.events { break-before:page; }
-  .page.glance { margin-top:10mm; }
-  .page.chapter { break-before:page; }
-  .chapter .hero { aspect-ratio:auto; height:48mm; border-radius:6px; }
-  .chapter .hero .day { font-size:40px; }
-  .summary { font-size:13px; }
-  .route { margin-top:10px; }
-  .place {
-    display:flex;
-    border:1px solid var(--soft);
-    border-radius:6px;
-    margin-bottom:3mm;
+  /* 화면은 옆으로 넘기는 한 줄이라 그대로 찍으면 첫 쪽만 나온다 → 위아래로 쌓는다 */
+  .book { --pw:520px; --ph:746px; display:block; height:auto; overflow:visible; padding:0; }
+  /* 화면에선 넘치는 내용을 쪽 안에서 스크롤 → 종이에선 잘리지 않게 높이를 풀어 다음 장으로 */
+  .page {
+    min-height:var(--ph);
+    height:auto;
+    overflow:visible;
+    box-shadow:none;
+    border-radius:0;
+    break-after:page;
     break-inside:avoid;
-    overflow:hidden;
   }
-  .place .photo { flex:0 0 46mm; aspect-ratio:auto; min-height:34mm; }
-  .place .pad { padding:8px 12px; }
-  .place h3 { font-size:16px; margin:4px 0 0; }
-  .place .info { font-size:12px; }
-  .why { margin-top:6px; font-size:12.5px; }
-  .ev { padding:8px 0; }
-  .ev .th { flex-basis:64px; height:64px; }
+  .page:last-child { break-after:auto; }
 }
 """
 
