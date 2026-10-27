@@ -2,15 +2,10 @@
 src/llm/calllog.py
 
 모델을 부른 기록과, 서버가 받은 생성 요청 하나의 기록을 남긴다. 호출 자체는 여기 없다
-(llm_client.py 가 한다). 둘은 SAVE_MODE 하나로 함께 켜고 끈다 — 셋(요청·LLM 응답·최종 응답)이
-같이 있어야 "왜 이렇게 나왔나"를 볼 수 있다.
+(llm_client · vllm_client 가 한다). 둘은 SAVE_MODE 하나로 함께 켜고 끈다 —
+셋(요청·LLM 응답·최종 응답)이 같이 있어야 "왜 이렇게 나왔나"를 볼 수 있다.
 
-파일로 남기는 이유는 둘이다 — 무료 등급에도 분당·일일 한도가 있어 "오늘 몇 번
-불렀나"가 스크롤에 밀리면 안 되고, "왜 이렇게 짰지"를 나중에 보려면 **그때 준 후보**와
-**그때 받은 답**이 같이 있어야 한다.
-
-갈라낸 이유: 날짜 배정 경로가 둘이던 때(llm.plan_days · llm_plan.plan_all, 2026-09-27 에
-하나로 줄였다) 기록하는 일이 한쪽 파일 안에 있어서, 다른 쪽이 밑줄 함수를 가져다 썼다.
+갈라낸 이유: Claude 호출(llm_client)과 vLLM 호출(vllm_client)이 같은 기록을 남긴다.
 """
 
 from __future__ import annotations
@@ -50,7 +45,7 @@ SAVE_VAR = "SAVE_MODE"
 # 노드 안에서 ContextVar 에 새 값을 넣으면 복사본에만 들어가 그래프 밖에서는 안 보였다
 # (2026-09-28 실호출에서 "호출 기록: 없음" 으로 찍혔다). 상자는 복사돼도 **같은 상자**를
 # 가리키므로, 밖에서 start_run() 으로 상자를 만들어 두면 노드가 넣은 값이 밖에서 보인다.
-_CURRENT_RUN: ContextVar[dict | None] = ContextVar("v0_current_run", default=None)
+_CURRENT_RUN: ContextVar[dict | None] = ContextVar("current_run", default=None)
 KST = timezone(timedelta(hours=9))
 
 

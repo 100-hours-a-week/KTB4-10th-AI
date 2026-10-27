@@ -49,7 +49,7 @@ def run(
     events: list[Candidate],
 ) -> Itinerary:
     """
-    조건 하나를 받아 일정 하나를 돌려준다. v0의 유일한 진입점이다.
+    조건 하나를 받아 일정 하나를 돌려준다. 생성의 진입점이다. 재생성은 run_regeneration.
 
     `places`·`events` 는 **그 지역의 후보 전부**다. 서버에서는 백엔드 DB 가 보내 준 것을
     그대로 넣는다. 테스트와 로컬 도구는 tools/dump_candidates.py 로 덤프에서 만든다.

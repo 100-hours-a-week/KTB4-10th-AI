@@ -172,6 +172,7 @@ def call_and_record(
     request 는 기록에 남길 입력이다 (모델에게 보내는 것은 system · payload).
     비용 칸은 비운다 — 런팟은 토큰이 아니라 켜 둔 시간으로 과금된다.
     """
+    # llm_client.call_and_record 의 import anthropic 과 같은 이유 (실제로 부를 때만 SDK 를 불러온다)
     import openai
 
     model = llm_client.load_api_key(MODEL_VAR)

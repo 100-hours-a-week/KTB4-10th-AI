@@ -109,8 +109,6 @@ class DayPlanDraft(BaseModel):
     구조화 출력에 넘길 스키마라 최상위가 객체여야 해서 한 겹 감쌌다.
     PlanDraftItem 이 content_id 만 받도록 돼 있으므로, "사실 데이터는 모델을 거치지
     않는다"는 규칙이 프롬프트가 아니라 **스키마로** 강제된다.
-
-    제목·소개·하루 요약은 2026-10-15 에 WriterDraft 로 옮겼다 (#35).
     """
 
     items: list[PlanDraftItem]
@@ -211,7 +209,7 @@ class TripSummary(BaseModel):
 
 
 class Itinerary(BaseModel):
-    """v0의 최종 산출물."""
+    """엔진(graph.run)의 최종 산출물."""
 
     summary: TripSummary
     itinerary: list[ItineraryDay]

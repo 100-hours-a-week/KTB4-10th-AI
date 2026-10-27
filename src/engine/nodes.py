@@ -28,7 +28,7 @@ from src.models import (
     TripSummary,
 )
 
-# 여행스타일이 v0에 영향을 주는 곳은 여기뿐이다.
+# 여행스타일로 하루 장소 수를 정한다. 글 쪽 반영은 trip_conditions 로 모델에 간다.
 PER_DAY_BY_STYLE = {"RELAXING": 3, "TIME_EFFICIENCY": 5}
 DEFAULT_PER_DAY = 4
 
@@ -185,8 +185,8 @@ def find_events(state: GraphState) -> dict:
     여행 기간과 겹치는 행사. 관심사에 맞는 것을 앞에 두되, **거르지는 않는다** —
     그 기간에만 있는 것이라 놓치면 아깝다. 0건은 실패가 아니다.
 
-    plan 노드가 이 목록을 앞에서부터 날짜에 배정하므로, 자리가 모자랄 때
-    관심사 쪽이 살아남는다. 장소(find_places)의 "맞는 것 먼저, 모자라면 채움"과 같은 방식이다.
+    arrange 가 행사를 이 순서대로 장소보다 앞에 두고 넘긴다 — 관심사 쪽을 먼저 보라는
+    힌트일 뿐 보장은 아니다. 장소(find_places)의 "맞는 것 먼저, 모자라면 채움"과 같은 방식이다.
     """
     wanted = set(state["wanted_lcls2"])
 
@@ -374,7 +374,7 @@ def _to_planned_place(
         coordinates = Coordinates(lat=candidate.lat, lng=candidate.lng)
 
     return PlannedPlace(
-        # LLM이 정한 것
+        # arrange·write 가 정한 것 (order 는 number_by_time 이 시각으로 매김)
         order=item.order,
         start_time=item.start_time,
         duration_minutes=item.duration_minutes,

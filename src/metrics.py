@@ -2,7 +2,7 @@
 src/metrics.py
 
 `/metrics` 로 나가는 숫자를 **정의만** 한다.
-숫자를 올리는 일은 쓰는 쪽(main · jobs · llm_arrange · llm_write)이 한다.
+숫자를 올리는 일은 쓰는 쪽(main · jobs · llm_arrange · llm_regenerate · llm_write)이 한다.
 
 src/ 바로 아래 둔 이유: 서버 쪽(src/server)과 LLM 쪽(src/llm)이 둘 다 쓴다.
 한쪽 폴더에 두면 다른 쪽이 그 폴더를 끌어다 써야 한다 (paths.py · dates.py 와 같은 이유).

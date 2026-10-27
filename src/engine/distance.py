@@ -2,10 +2,6 @@
 src/engine/distance.py
 
 두 방문지 사이 직선 거리. build 가 그날 구간 거리를 채울 때 쓴다.
-
-2026-09-28 까지 이름이 same_spot.py 였다 — "같은 자리"로 후보를 합치던 코드가 있던 곳이다.
-그 기능이 빠지고 거리 계산만 남아 이름을 바꿨다. "같은 자리"로 볼 기준(SAME_SPOT_KM)은
-화면만 쓰므로 tools/guidebook_html.py 에 있다.
 """
 
 from __future__ import annotations

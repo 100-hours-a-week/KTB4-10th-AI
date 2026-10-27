@@ -1,7 +1,7 @@
 """
 src/engine/data.py
 
-v0가 읽는 바깥 데이터는 전부 여기를 거친다 — 지역코드표, 분류코드표, 취향 코드표.
+엔진이 읽는 바깥 데이터는 전부 여기를 거친다 — 지역코드표, 분류코드표, 취향 코드표.
 후보(장소·행사)는 백엔드가 보내 준다. 테스트용 덤프 읽기는 tools/dump_candidates.py 에 있다.
 
 TourAPI를 호출하지 않는다. 전부 로컬 파일 읽기다.
@@ -84,7 +84,10 @@ FAMILY_THEMES = {
 
 
 class DataError(Exception):
-    """데이터 파일이 없거나 찾는 값이 표에 없을 때. 메시지를 그대로 사용자에게 보여준다."""
+    """
+    데이터 파일이 없거나 찾는 값이 표에 없을 때. tools 는 메시지를 화면에 보여 주고,
+    서버는 adapter 가 InputError 로 바꿔 로그에만 남긴다.
+    """
 
 
 def _read_json(path: Path) -> dict:
@@ -114,8 +117,8 @@ def find_region_codes(province: str, city: str | None) -> tuple[str, str | None]
             f"'{province}' 를 찾지 못했습니다. 후보: " + ", ".join(sorted(provinces))
         )
 
-    if not city:  # city 가 없을 경우
-        return entry["code"], None  # lDongRegnCd 랑 None 반환
+    if not city:
+        return entry["code"], None
 
     sigungu_code = entry["cities"].get(city)
     if sigungu_code is None:
@@ -124,7 +127,7 @@ def find_region_codes(province: str, city: str | None) -> tuple[str, str | None]
             + ", ".join(sorted(entry["cities"]))
         )
 
-    return entry["code"], sigungu_code  # lDongRegnCd 랑 lDongSignguCd
+    return entry["code"], sigungu_code
 
 
 @lru_cache(maxsize=1)
@@ -220,6 +223,6 @@ def preference_code(label: str, preference_type: str) -> str | None:
     화면에 쓰는 것이 아니라 취향 티어의 기준이라, 틀린 채로 흘러가면 조용히
     엉뚱한 일정이 나온다. 부르는 쪽이 거절해야 한다.
     """
-    if not PREFERENCE_ENUM_PATH.exists():  # ENUM 표 없음
+    if not PREFERENCE_ENUM_PATH.exists():
         raise DataError(f"{PREFERENCE_ENUM_PATH} 가 없습니다.")
     return _preference_codes().get((preference_type, label))

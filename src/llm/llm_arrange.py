@@ -5,12 +5,7 @@ src/llm/llm_arrange.py
 둘지·몇 시에 갈지까지 모델이 정한다. 문구(제목·소개·하루 요약·추천 이유)는 쓰지 않는다 —
 배치가 끝난 뒤 src/llm/llm_write.py 가 고른 곳의 overview 를 보고 쓴다 (2026-10-15, #35).
 
-2026-09-27 까지는 코드가 날짜를 묶고 모델은 하루 안의 순서만 정하는 경로(llm.plan_days)와
-나란히 있었다. 그 경로를 지우면서 같은 자리 합치기·붙이기도 함께 버렸다 — 이 경로에는
-처음부터 없던 기능이다 (docs/archive/claude-260928/plan/llm-plan-only.md).
-
 Claude 를 부르는 부품(설정 · LLMError · call_and_record)은 llm_client 에 있다.
-2026-10-15 까지 이 파일 이름은 llm_plan.py 였다 (#35).
 
 **arrange_all 은 기본으로 Claude 를 부른다.** 모델은 LLM_MODEL (비우면 claude-sonnet-5).
 LLM_MODE=fake 일 때만 Claude 를 부르는 자리를 가짜(src/llm/fake_llm.py)가 대신한다 —
@@ -37,8 +32,9 @@ from src.llm.llm_client import LLMError
 from src.models import Candidate, DayPlanDraft, PlanDraftItem, TripRequest
 
 # 배치 호출 한 건의 상한. SDK 는 **시간 초과도 재시도**하므로 시간 초과가 두 번
-# 이어지면 140 × 2 + 재시도 대기(이때는 8초 이하) = 288초다. 여기에 글쓰기 호출의 최악
-# (llm_write.WRITE_TIMEOUT)을 더한 값이 서버의 작업 타임아웃(jobs.JOB_TIMEOUT)보다 짧아야
+# 이어지면 140 × 2 + 재시도 대기(이때는 8초 이하) = 288초다. 여기에 워커 확인(10초)과
+# 글쓰기 호출의 최악(llm_write.WRITE_TIMEOUT · VLLM_WRITE_TIMEOUT)을 더한 값이
+# 서버의 작업 타임아웃(jobs.JOB_TIMEOUT)보다 짧아야
 # 작업이 실패로 접힌 뒤 실이 혼자 계속 돌지 않는다.
 # 다만 서버가 429·5xx 에 retry-after 를 붙이면 SDK 는 그만큼 상한 없이 기다려 작업 상한을
 # 넘을 수 있다 (드묾).
@@ -186,8 +182,7 @@ def payload_fields(
     모델에게 넘길 칸. 재생성(llm_regenerate)이 여기에 이전 배치·피드백을 더해 쓴다.
 
     **행사 기간과 여행 날짜**가 들어간다 — 그게 없으면 모델이 날짜를 정할 근거가 없다.
-    **여행 조건(trip)**도 들어간다 — 없으면 추천 이유와 제목을 조건에 맞춰 쓸 수 없다
-    (2026-09-27 까지 빠져 있었다. 프롬프트는 조건에 맞추라는데 조건을 안 보냈다).
+    **여행 조건(trip)**도 들어간다 — 관심사·동행·스타일을 보고 고르고 배치하게.
 
     좌표는 넣지 않는다 — 동선을 보려면 필요하지만, 넣으면 모델이 좌표를 되돌려줄 여지가
     생긴다. 사실 데이터를 한 방향으로만 흐르게 두는 편이 낫다고 보고 일단 뺐다.
@@ -229,8 +224,8 @@ def _validate_all(
     exact_count 를 끄면 「정확히 N개」만 건너뛴다 — 재생성은 "여유롭게"·"빼 줘"로
     장소가 줄 수 있다 (#44). 하루 최대·하루 1곳 이상은 그대로 본다.
 
-    일곱 가지를 보는데 성격이 둘로 갈린다 — **행사 기간 검사만이 사실 검사**이고
-    (어기면 사용자에게 거짓 정보가 나간다), 나머지 여섯은 우리가 정한 형식·규칙이다.
+    아홉 가지를 보는데 성격이 둘로 갈린다 — **행사 기간 검사만이 사실 검사**이고
+    (어기면 사용자에게 거짓 정보가 나간다), 나머지 여덟은 우리가 정한 형식·규칙이다.
 
     order 관련 검사 둘은 없앴다. 모델이 order 를 안 돌려주므로 어긋날 수가 없다.
     관심 장소 누락 검사도 없앴다 (#26) — 먼 섬처럼 동선이 무리한 관심 장소는 빼도
@@ -341,7 +336,7 @@ def _claude_arrange_all(model: str, payload: str, trip: TripRequest) -> DayPlanD
     """실제 Claude 를 1회 호출한다. [비용 발생]"""
     request = {
         "stage": "arrange",  # 한 작업에 호출이 둘이라 기록에서 가른다
-        "trip": trip.model_dump(),  # 기록용
+        "trip": trip.model_dump(),
         "system": SYSTEM_PROMPT,
         "candidates": json.loads(payload),
     }

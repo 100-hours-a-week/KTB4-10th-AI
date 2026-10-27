@@ -7,8 +7,8 @@ src/dates.py
     TourAPI   20261012      행사 기간이 여행 기간과 겹치는지 비교하는 형식
     ISO       2026-10-12    안쪽에서 들고 다니는 형식
 
-모아 둔 이유: 같은 변환이 nodes·adapter·llm_plan·guidebook_html 네 곳에 따로 있었고,
-llm_plan 은 순환 import 를 피하려고 형식 문자열을 베껴 갖고 있었다.
+모아 둔 이유: 같은 변환을 여러 곳(nodes · adapter · llm_arrange · fake_llm)이 쓴다 —
+한 곳에 두어 형식이 갈라지지 않게.
 
 **화면에 보이는 모양(`10/12`·`2026.10.12`)은 여기 없다.** 그건 형식 변환이 아니라
 표시 방식이고, 바뀌는 이유도 다르다 (output/book_html.py 의 일이다).

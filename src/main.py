@@ -8,7 +8,7 @@ src/main.py
 재시도 엔드포인트는 두지 않는다 — 백엔드가 새 request_id 로 생성을 다시 부른다 (계약 9장).
 
 띄우기:
-    uv run uvicorn src.main:app --reload
+    uv run --env-file .env uvicorn src.main:app --reload
 
 서버는 **기본으로 실제 모델을 부른다** (요청 1건마다 과금). LLM_MODE=fake 일 때만 가짜로 돈다 —
 클라우드팀 부하 테스트용. 켜져 있으면 시작 로그 · /health · /metrics 에 드러나게 했다.
@@ -36,9 +36,9 @@ from src.server import adapter, jobs
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 설정이 틀렸으면 첫 요청에서야 실패한다. 켜기 전에 막는다
-    mode = llm_client.llm_mode()  # real or fake
-    save = calllog.save_mode()  # True or False (ON or OFF)
-    write_backend = vllm_client.write_backend()  # claude or vllm (글쓰기만)
+    mode = llm_client.llm_mode()
+    save = calllog.save_mode()
+    write_backend = vllm_client.write_backend()
     if mode == "fake":
         # 운영 서버에서 부하 테스트를 한다. 가짜로 켜진 걸 모르고 지나가면 안 된다
         logs.write(
@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI):
         write_backend=write_backend,
     )
 
-    workers = jobs.start()  # 큐 생성 + 워커 3개
+    workers = jobs.start()
 
     # 여기서 서버가 요청을 받는 동안 멈춰 있다. (yield 앞이 서버 켤 때, 뒤가 끌 때)
     yield
@@ -104,7 +104,6 @@ async def _count_requests(request: Request, call_next):
     return response
 
 
-# 응답 형태를 통일시켜 준다.
 def _envelope(message: str, data: dict | None = None) -> dict:
     return {"message": message, "data": data}
 
@@ -186,20 +185,19 @@ async def create_generation(payload: dict) -> dict:
     **안에서 오래 걸리는 일을 하면 안 된다** — 그동안 서버 전체가 멈춘다.
     """
     request_id = payload.get("request_id")
-    if not isinstance(request_id, str) or not request_id:  # 없거나 빈 문자열이면
+    if not isinstance(request_id, str) or not request_id:
         raise HTTPException(400, detail="invalid_request")
 
     mark = jobs.fingerprint(payload)
 
     # 응답이 유실되면 백엔드가 같은 번호로 다시 보낸다. 새 작업을 만들지 않는다
     try:
-        already = jobs.existing(request_id, mark)  # return job
+        already = jobs.existing(request_id, mark)
     except jobs.RequestIdConflict:
         raise HTTPException(409, detail="request_id_conflict") from None
     if already is not None:
         return _envelope("guidebook_accepted", jobs.accepted(already))
 
-    # 양식 바꾸기와 검증
     try:
         trip = adapter.to_trip_request(payload)
         places, events = adapter.to_candidates(payload.get("contents"))
@@ -214,7 +212,6 @@ async def create_generation(payload: dict) -> dict:
         )
         raise HTTPException(400, detail=exc.code) from exc
 
-    # 큐에 작업 넣기
     try:
         job = jobs.accept(trip, places, events, request_id, mark, payload)
     except asyncio.QueueFull:
@@ -283,7 +280,7 @@ async def regenerate(job_id: str, payload: dict) -> dict:
 
 @app.get("/guidebooks-generations/{job_id}")
 async def get_generation(job_id: str) -> dict:
-    job = jobs.jobs.get(job_id)  # 저장소 jobs에서 꺼낸다.
+    job = jobs.jobs.get(job_id)
     if job is None:
         # 재시작·24시간 정리로 사라진 작업도 백엔드가 실패로 확정하게 404 대신 실패로 답한다
         # (백엔드 요청). 처음부터 없던 id 와 가를 수 없어 백엔드 버그가 묻히므로 로그는 남긴다

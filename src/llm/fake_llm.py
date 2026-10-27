@@ -8,15 +8,16 @@ src/llm/fake_llm.py
 
 쓰는 곳이 둘이다.
     서버 부하 테스트 — LLM_MODE=fake 이면 llm_arrange.arrange_all 이 Claude 대신 answer() 를,
+                      llm_regenerate.rearrange_all 이 rearrange_all() 을,
                       llm_write.write_all 이 write_all() 을 부른다. **Claude 를 부르는 자리만**
                       대신하므로 응답 검사·후처리는 진짜와 똑같이 돈다.
                       기다리는 시간(FAKE_LLM_DELAY_SEC)은 배치에만 둔다 — 값 하나로 작업 전체의
                       모델 시간을 흉내 내던 부하 테스트 설정을 그대로 쓰게 하려고.
-    테스트·로컬 도구 — tools/fake_llm.py 가 llm_arrange.arrange_all · llm_write.write_all 을 통째로
-                      바꿔 끼운다.
+    테스트·로컬 도구 — tools/fake_llm.py 가 llm_arrange.arrange_all · llm_regenerate.rearrange_all ·
+                      llm_write.write_all 을 통째로 바꿔 끼운다 — 그래서 응답 검사도 건너뛴다.
 
-2026-09-29 전에는 tools/ 에만 있었다 ("서버는 항상 실제 모델"). 클라우드팀 부하 테스트에
-Claude 를 부르면 돈이 나가고 응답 시간도 매번 달라서, 기본은 진짜로 두고 스위치로만 켜게 했다.
+클라우드팀 부하 테스트에 Claude 를 부르면 돈이 나가고 응답 시간도 매번 달라서, 서버는 기본으로
+진짜를 부르고 LLM_MODE=fake 로만 가짜를 켠다.
 """
 
 from __future__ import annotations
@@ -100,7 +101,8 @@ def arrange_all(
     프롬프트가 모델에게 시키는 규칙과 같다. 가짜가 검사(_validate_all)를 통과하는
     답을 내야 조립 이후 단계를 모델 없이 돌려 볼 수 있다.
 
-    trip 은 받기만 한다. llm_arrange.arrange_all 자리에 그대로 끼우려면 모양이 같아야 한다.
+    conditions · trip 은 받기만 한다. llm_arrange.arrange_all 자리에 그대로 끼우려면
+    모양이 같아야 한다.
     """
     buckets: list[list[Candidate]] = [[] for _ in range(day_count)]
 
@@ -192,7 +194,7 @@ def _by_deadline(events: list[Candidate]) -> list[Candidate]:
     차지하면, 그 날에만 열리는 행사가 통째로 빠진다.
     전수 조사에서 15,597건 중 750건(4.8%)이 그랬다.
 
-    마감이 급한 것부터 놓으면 그 일이 안 생긴다. contentid 를 같이 넣는 것은
+    마감이 급한 것부터 놓으면 그 일이 안 생긴다. content_id 를 같이 넣는 것은
     끝나는 날이 같을 때 순서를 고정해 같은 입력에 같은 결과가 나오게 하려는 것이다.
     """
     return sorted(events, key=lambda e: (e.event_end_date or "", e.content_id))

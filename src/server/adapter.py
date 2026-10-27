@@ -1,7 +1,7 @@
 """
 src/server/adapter.py
 
-백엔드 말 ↔ v0 말. 번역만 한다. 계약서는 docs/backend/backend-AI-API.md.
+백엔드 말 ↔ 엔진 말. 번역만 한다. 계약서는 docs/backend/backend-AI-API.md.
 
 따로 둔 이유: 막혔을 때 원인이 번역인지 그래프인지 바로 갈린다.
 """
@@ -56,7 +56,6 @@ def to_trip_request(payload: dict) -> TripRequest:
     if not region.get("city"):
         raise InputError("invalid_request", "region.city 가 없습니다")
 
-    # 중분류와 여행스타일을 코드로 변환
     detail_codes, travel_styles = _to_preference_codes(payload.get("preferences"))
 
     try:
@@ -66,7 +65,8 @@ def to_trip_request(payload: dict) -> TripRequest:
             start_date=payload.get("start_date"),
             end_date=payload.get("end_date"),
             companion=payload.get("companion"),
-            # 계약 필수다. 기본값을 두면 빠진 요청이 조용히 1명으로 짜인다
+            # 계약 필수다. 없으면 None 을 그대로 넘겨 검증에서 거절한다 —
+            # 모델의 기본값 1 은 tools·tests 가 짧게 만들 때 쓴다
             people_count=payload.get("people_count"),
             detail_codes=detail_codes,
             travel_styles=travel_styles,
@@ -79,7 +79,7 @@ def to_trip_request(payload: dict) -> TripRequest:
             "invalid_request", f"people_count 는 {MIN_PEOPLE}~{MAX_PEOPLE} 입니다"
         )
 
-    _check_dates(trip)  # 날짜 형식과 기간 체크
+    _check_dates(trip)
 
     try:
         data.find_region_codes(trip.province, trip.city)
@@ -90,7 +90,7 @@ def to_trip_request(payload: dict) -> TripRequest:
 
 
 def _check_dates(trip: TripRequest) -> None:
-    """날짜 형식은 우리 것(YY.MM.DD)으로 맞추기로 했다."""
+    """형식은 _date 가 보고, 여기서는 순서와 길이(최대 MAX_DAYS 일)를 본다."""
     start = _date(trip.start_date)
     end = _date(trip.end_date)
 
@@ -138,14 +138,14 @@ def _to_preference_codes(preferences: object) -> tuple[list[str], list[str]]:
     detail_codes: list[str] = []
     for labels in mid.values():
         for label in labels if isinstance(labels, list) else []:
-            detail_codes.append(_code(label, "DETAIL"))  # 코드로 변환
+            detail_codes.append(_code(label, "DETAIL"))
 
     if not detail_codes:
         raise InputError("invalid_preference_mapping", "고른 중분류가 없습니다")
 
     travel_styles = [
         _code(label, "TRAVEL_STYLE") for label in preferences.get("travel_style") or []
-    ]  # 코드로 변환
+    ]
 
     return detail_codes, travel_styles
 
@@ -192,7 +192,7 @@ def to_candidates(contents: object) -> tuple[list[Candidate], list[Candidate]]:
     """
     if not isinstance(contents, list) or not contents:
         raise InputError("invalid_request", "contents 가 비었습니다")
-    if len(contents) > MAX_CONTENTS:  # 최대 후보 개수 이상인지 체크
+    if len(contents) > MAX_CONTENTS:
         raise InputError("invalid_request", f"contents 는 최대 {MAX_CONTENTS}개입니다")
 
     places: list[Candidate] = []

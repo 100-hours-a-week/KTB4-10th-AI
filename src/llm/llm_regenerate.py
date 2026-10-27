@@ -127,7 +127,7 @@ def _claude_rearrange_all(
     request = {
         "stage": "arrange",
         "regenerate": True,  # 기록에서 생성 배치와 가르려고
-        "trip": trip.model_dump(),  # 기록용
+        "trip": trip.model_dump(),
         "system": PROMPT,
         "candidates": json.loads(payload),
     }

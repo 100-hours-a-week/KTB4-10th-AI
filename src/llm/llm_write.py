@@ -8,8 +8,8 @@ src/llm/llm_write.py
 전부에 붙이면 입력이 몇 배가 된다. 고른 곳에만 붙이려면 배치가 먼저 끝나야 한다.
 
 입력·출력 모양은 자체 모델 학습 데이터(samples/open_model/label_inputs_v7.jsonl)를 따른다 —
-나중에 이 호출을 자체 모델로 바꾼다. 지시문은 v7 이 아니라 #26 의 문구 규칙에 overview
-규칙을 더한 것이다 (v7 로 갈지는 자체 모델로 바꿀 때 정한다).
+자체 모델(vLLM)로도 쓸 수 있게 해 두었다. Claude 지시문은 v7 이 아니라 #26 의 문구 규칙에
+overview 규칙을 더한 것이고, vLLM 은 기본으로 v7 지시문(v7_prompt)을 쓴다.
 
 추천 이유는 장소 소개가 아니라 여행자의 조건(관심사·여행 스타일)과 장소를 잇는 글이다 (#39).
 한 문장(#36)으로는 조건과 장소의 점을 함께 담지 못해 소개만 남았다. 그래서 문장 수 대신
@@ -43,7 +43,8 @@ WRITE_TIMEOUT = 120
 
 # 런팟 vLLM 글쓰기의 상한. L4 에서 초당 약 15토큰이라 학습 데이터 최장 답(2,659토큰)이
 # 약 177초 걸린다 — 120초면 긴 일정이 실패했다 (2026-10-17, 7일 35곳).
-# 재시도는 없다(vllm_client.VLLM_MAX_RETRIES) — 배치 최악 288초 + 240초가 작업 상한 600초 안
+# 재시도는 없다(vllm_client.VLLM_MAX_RETRIES) — 배치 최악 288초 + 워커 확인 10초 + 240초
+# = 538초가 작업 상한 600초 안
 VLLM_WRITE_TIMEOUT = 240
 
 # 자체 모델 학습 데이터가 overview 를 200자로 잘라 넣었다. 입력 모양을 그와 같게 둔다.
@@ -282,7 +283,7 @@ def _claude_write_all(model: str, payload: str, trip: TripRequest) -> WriterDraf
     """실제 Claude 를 1회 호출한다. [비용 발생]"""
     request = {
         "stage": "write",  # 한 작업에 호출이 둘이라 기록에서 가른다
-        "trip": trip.model_dump(),  # 기록용
+        "trip": trip.model_dump(),
         "system": SYSTEM_PROMPT,
         "plan": json.loads(payload),
     }
@@ -296,14 +297,15 @@ def _vllm_write_all(payload: str, trip: TripRequest) -> WriterDraft:
     런팟 vLLM(자체 모델)을 1회 호출한다. 지시문은 VLLM_PROMPT 로 고른다 —
     v7(기본, 모델이 학습한 그대로) 또는 claude(위 SYSTEM_PROMPT).
     """
-    if vllm_client.prompt_choice() == "claude":
+    choice = vllm_client.prompt_choice()
+    if choice == "claude":
         system = SYSTEM_PROMPT
     else:
         system = v7_prompt.SYSTEM_PROMPT
     request = {
         "stage": "write",
         "backend": "vllm",  # 기록에서 Claude 글쓰기와 가르려고
-        "prompt": vllm_client.prompt_choice(),
+        "prompt": choice,
         "trip": trip.model_dump(),
         "system": system,
         "plan": json.loads(payload),

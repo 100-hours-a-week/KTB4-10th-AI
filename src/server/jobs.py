@@ -79,8 +79,6 @@ async def stop(workers: list[asyncio.Task]) -> None:
 
 def fingerprint(payload: dict) -> str:
     """요청 본문의 지문. 같은 request_id 에 다른 내용이 왔는지 이것으로 가른다."""
-    # 요청 본문 전체를 64글자짜리 요약 문자열 하나로 바꾼다.
-    # 내용이 같으면 늘 같은 문자열. 한 글자라도 다르면 전혀 다른 문자열.
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -91,14 +89,13 @@ def existing(request_id: str, mark: str) -> dict | None:
 
     번호가 같은데 내용이 다르면 둘이 섞이지 않게 거절한다 (RequestIdConflict).
     """
-    job_id = request_map.get(request_id)  # request_map으로 job_id와 request_id를 매핑
-    if job_id is None:  # 처음 보는 번호면 None 반환해서 계속 진행
+    job_id = request_map.get(request_id)
+    if job_id is None:
         return None
 
-    job = jobs[job_id]  # 작업 딕셔너리 jobs
-    if job["fingerprint"] != mark:  # 같은 request번호 + 요약 문자열이 다르면
-        raise RequestIdConflict  # 409
-    # 같은 번호 + 요약 문자열이 같음 → 기존 작업을 돌려줌 → 새로 안 만들고 202
+    job = jobs[job_id]
+    if job["fingerprint"] != mark:
+        raise RequestIdConflict
     return job
 
 
@@ -128,7 +125,7 @@ def accept(
         "events": events,
         "fingerprint": mark,
         "request_id": request_id,
-        "request": request,  # 백엔드 요청 본문
+        "request": request,
         "accepted_at": datetime.now(calllog.KST),
     }
     _enqueue(job)
@@ -154,7 +151,7 @@ def accept_regeneration(
         "status": "pending",
         "result": None,
         "error": None,
-        # 원래 작업의 조건·후보를 그대로 옮긴다 (plan 정할 것 7)
+        # 원래 작업의 조건·후보를 그대로 옮긴다
         "trip": source["trip"],
         "places": source["places"],
         "events": source["events"],
@@ -177,11 +174,13 @@ def _enqueue(job: dict) -> None:
     jobs[job["job_id"]] = job
     try:
         job_queue.put_nowait(job["job_id"])
-    except asyncio.QueueFull:  # 큐가 꽉 차면 저장소에서 다시 지우고 QueueFull을 올린다.
+    except asyncio.QueueFull:
         del jobs[job["job_id"]]
         raise
 
-    # 큐에 넣는 것에 성공하면 request_map 에 job_id 를 적는다.
+    # 큐에 넣는 데 성공한 뒤에만 적는다. 먼저 적으면 QueueFull 로 jobs 에서 지워진 작업을
+    # 가리키게 되어, 같은 request_id 의 재전송이 existing() 의 jobs[job_id] 에서
+    # KeyError(500)가 난다
     request_map[job["request_id"]] = job["job_id"]
 
 
@@ -216,10 +215,8 @@ def public(job: dict) -> dict:
 
 async def worker() -> None:
     """큐에서 하나 꺼내 일정을 만들고, 성공이든 실패든 작업에 적는다."""
-    # 무한 루프 : 큐에서 job_id 하나 꺼냄 -> _process -> task_done()
-    # 동시에 최대 MAX_CONCURRENCY건.
     while True:
-        job_id = await job_queue.get()  # queue에서 job_id를 하나 꺼낸다.
+        job_id = await job_queue.get()
         try:
             await _process(jobs[job_id])
         finally:
@@ -229,9 +226,8 @@ async def worker() -> None:
 
 
 async def _process(job: dict) -> None:
-    job["status"] = "processing"  # 상태를 processing으로
+    job["status"] = "processing"
 
-    # 후처리 시간 재기 시작 준비
     metrics.start_job_timing()
     # 이 작업의 LLM 기록 파일 이름을 받을 상자. 워커마다 제 문맥이라 작업끼리 섞이지 않고,
     # to_thread 로 넘긴 실도 같은 상자를 본다 (calllog._CURRENT_RUN 설명 참고)
@@ -240,7 +236,6 @@ async def _process(job: dict) -> None:
 
     # _succeed 도 try 안에 둔다. else 에 두면 그 안의 예외(응답 만들기·HTML 그리기)는
     # 아래 except 들이 못 잡고 worker() 의 루프를 끊는다 — 워커가 조용히 하나씩 사라진다
-    # JOB_TIMEOUT 동안 기다림
     try:
         itinerary = await asyncio.wait_for(_generate(job), JOB_TIMEOUT)
         _succeed(job, itinerary)
@@ -261,7 +256,7 @@ async def _process(job: dict) -> None:
         # 예상 못 한 오류. 원인을 찾으려면 어디서 났는지가 필요하다
         detail = "".join(traceback.format_exception(exc))
         _fail(job, "generation_failed", str(exc), "application_exception", detail)
-    finally:  # 작업 시간을 /metrics 에 기록
+    finally:
         metrics.JOB_DURATION.observe(time.monotonic() - started)
 
     _save_generation(job)
@@ -314,7 +309,7 @@ async def _generate(job: dict) -> Itinerary:
 def _regenerate(job: dict) -> Itinerary:
     """
     재생성 1회. 후보는 원래 작업 것을 그대로 쓴다 — 피드백으로 뺀 곳은 이 작업의
-    배치에서 이미 빠져 있고, 다음 재생성은 그 배치에서 시작한다 (plan 정할 것 7, 10-17 다시 정함).
+    배치에서 이미 빠져 있고, 다음 재생성은 그 배치에서 시작한다 (10-17 다시 정함).
     """
     previous = job["previous_itinerary"]
     itinerary = graph.run_regeneration(
@@ -324,7 +319,7 @@ def _regenerate(job: dict) -> Itinerary:
         previous_plan=nodes.plan_from_itinerary(previous),
         feedback=job["feedback"],
     )
-    # 제목만 바꾸는 재생성은 없다 — title 이 없으면 이전 제목 그대로 (plan 정할 것 3)
+    # 제목만 바꾸는 재생성은 없다 — title 이 없으면 이전 제목 그대로
     itinerary.title = job["title"] or previous.title
     return itinerary
 
@@ -334,7 +329,6 @@ def _succeed(job: dict, itinerary: Itinerary) -> None:
     빈 일정은 여기까지 오지 않는다 — 후보가 일수보다 적으면 nodes.arrange 가,
     빈 날이 있으면 llm_arrange 의 검사가 먼저 멈춘다.
     """
-    # 계약 형식대로 모양을 만들어 result에 넣는다.
     job.update(status="completed", result=adapter.to_response(job["trip"], itinerary))
     # 다음 재생성의 「이전 배치」 · 이전 제목 (#44)
     job["itinerary"] = itinerary

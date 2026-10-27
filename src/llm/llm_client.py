@@ -4,8 +4,8 @@ src/llm/llm_client.py
 **Claude 를 부르는 공통 부품.** 배치(llm_arrange)와 글쓰기(llm_write)가 같이 쓴다 —
 설정 · LLMError · 모드(real/fake) · 키 읽기 · SDK 호출 · 호출 기록.
 
-2026-10-15 에 llm_plan.py 에서 떼어 냈다 (#35). 배치와 글쓰기로 나뉘자, 글쓰기가 배치
-파일에서 호출 부품을 가져다 쓰는 모양이 되어서다. 지시문·입력·검사는 단계마다 제 파일에 있다.
+배치 파일에 두면 글쓰기가 배치 파일에서 호출 부품을 가져다 쓰는 모양이 되어 따로 뗐다.
+지시문·입력·검사는 단계마다 제 파일에 있다.
 """
 
 from __future__ import annotations
@@ -89,6 +89,8 @@ def call_and_record(
     배치와 글쓰기(llm_write)가 같이 쓴다 — 기록·비용 계산이 두 벌로 갈라지지 않게.
     request 는 기록에 남길 입력이다 (모델에게 보내는 것은 system · payload).
     """
+    # 파일 맨 위가 아니라 여기서 불러온다 — 실제로 부를 때만 SDK 가 올라오고,
+    # 가짜 모드 서버와 테스트는 아예 불러오지 않는다 (불러오기 0.3초쯤, 10-27 측정)
     import anthropic
 
     client = anthropic.Anthropic(
@@ -141,12 +143,11 @@ def load_api_key(key_var: str) -> str:
     python-dotenv 를 쓰지 않는 이유는 의존성이 하나 더 늘어서다. 형식이 단순해 직접 읽는
     편이 낫다.
     """
-    # 환경변수
     from_env = os.environ.get(key_var, "").strip()
     if from_env:
         return from_env
 
-    if not ENV_PATH.exists():  # .env 파일이 없으면
+    if not ENV_PATH.exists():
         raise LLMError(f"환경변수 {key_var} 도 {ENV_PATH} 도 없습니다.")
 
     for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
