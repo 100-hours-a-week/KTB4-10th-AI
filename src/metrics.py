@@ -61,6 +61,16 @@ GENERATION_ERRORS = Counter(
     ["kind"],
 )
 
+# --- 백엔드 콜백 ---
+CALLBACKS_TOTAL = Counter(
+    "generation_callbacks_total",
+    "백엔드 콜백 결과별 건수. rejected 는 4xx 로 거절됨, gave_up 은 재시도를 다 써도 못 보냄",
+    ["kind", "result"],  # kind: progress · final
+)
+for kind in ("progress", "final"):
+    for result in ("delivered", "rejected", "gave_up"):
+        CALLBACKS_TOTAL.labels(kind=kind, result=result)
+
 # --- LLM ---
 LLM_CALL_DURATION = Histogram(
     "llm_call_duration_seconds",

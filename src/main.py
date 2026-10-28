@@ -30,7 +30,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src import logs, metrics
 from src.llm import calllog, fake_llm, llm_client, vllm_client
-from src.server import adapter, jobs
+from src.server import adapter, callback, jobs
 
 
 @asynccontextmanager
@@ -66,12 +66,15 @@ async def lifespan(app: FastAPI):
         write_backend=write_backend,
     )
 
+    callback.start()
     workers = jobs.start()
 
     # 여기서 서버가 요청을 받는 동안 멈춰 있다. (yield 앞이 서버 켤 때, 뒤가 끌 때)
     yield
     # 끌 때 : 큐가 빌 때까지 기다린 뒤 워커 취소하기 (이미 시작된 호출을 버리지 않으려고)
     await jobs.stop(workers)
+    # 작업이 다 끝난 뒤라야 마지막 완료 알림까지 보내는 중이다
+    await callback.stop()
 
 
 app = FastAPI(title="가이드북 생성 서버", lifespan=lifespan)

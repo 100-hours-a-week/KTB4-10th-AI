@@ -27,7 +27,7 @@ from src.engine.nodes import FeedbackNotApplicable, InsufficientCandidates
 from src.llm import calllog
 from src.llm.llm_client import LLMError
 from src.models import Candidate, Itinerary, TripRequest
-from src.server import adapter
+from src.server import adapter, callback
 
 MAX_CONCURRENCY = 3  # 동시에 LLM 을 부르는 작업 수. 분당 한도를 아직 모른다
 MAX_QUEUE = 100
@@ -259,6 +259,7 @@ async def _process(job: dict) -> None:
     finally:
         metrics.JOB_DURATION.observe(time.monotonic() - started)
 
+    callback.notify_final(job)
     _save_generation(job)
 
 
@@ -298,15 +299,27 @@ async def _generate(job: dict) -> Itinerary:
     graph.run 은 동기 함수다. 이벤트 루프에서 그대로 부르면 그동안 서버 전체가 멈춘다.
     (다른 워커,접수,조회 모두)
     따라서 asyncio.to_thread로 별도 스레드로 넘겨서 이벤트 루프는 그동안 다른 일을 한다.
+
+    단계 알림(on_step)은 그 스레드에서 불린다. 알림은 이벤트 루프에서 보내야 해서
+    (sequence 를 루프 하나에서만 올리려고) call_soon_threadsafe 로 넘긴다.
     """
+    loop = asyncio.get_running_loop()
+
+    def on_step(step: str) -> None:
+        loop.call_soon_threadsafe(callback.notify_progress, job, step)
+
     if "source_job_id" in job:
-        return await asyncio.to_thread(_regenerate, job)
+        return await asyncio.to_thread(_regenerate, job, on_step)
     return await asyncio.to_thread(
-        graph.run, job["trip"], places=job["places"], events=job["events"]
+        graph.run,
+        job["trip"],
+        places=job["places"],
+        events=job["events"],
+        on_step=on_step,
     )
 
 
-def _regenerate(job: dict) -> Itinerary:
+def _regenerate(job: dict, on_step) -> Itinerary:
     """
     재생성 1회. 후보는 원래 작업 것을 그대로 쓴다 — 피드백으로 뺀 곳은 이 작업의
     배치에서 이미 빠져 있고, 다음 재생성은 그 배치에서 시작한다 (10-17 다시 정함).
@@ -318,6 +331,7 @@ def _regenerate(job: dict) -> Itinerary:
         events=job["events"],
         previous_plan=nodes.plan_from_itinerary(previous),
         feedback=job["feedback"],
+        on_step=on_step,
     )
     # 제목만 바꾸는 재생성은 없다 — title 이 없으면 이전 제목 그대로
     itinerary.title = job["title"] or previous.title
