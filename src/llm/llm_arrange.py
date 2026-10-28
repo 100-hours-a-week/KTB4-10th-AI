@@ -133,9 +133,9 @@ def arrange_all(
 
 def _iso(yyyymmdd: str | None) -> str | None:
     """20261014 -> 2026-10-14. 모델이 날짜를 비교할 때 형식이 섞이지 않게 맞춘다."""
-    if not yyyymmdd or len(yyyymmdd) != 8:
+    if not yyyymmdd:
         return None
-    return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
+    return dates.parse_tourapi(yyyymmdd).isoformat()
 
 
 def candidate_entry(candidate: Candidate) -> dict:

@@ -14,10 +14,10 @@ import json
 import os
 import re
 from contextvars import ContextVar
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 
-from src import logs
+from src import dates, logs
 from src.paths import REPO_ROOT
 
 OUT_DIR = REPO_ROOT / "_out"  # 산출물은 전부 여기 아래. 커밋되지 않는다
@@ -46,7 +46,6 @@ SAVE_VAR = "SAVE_MODE"
 # (2026-09-28 실호출에서 "호출 기록: 없음" 으로 찍혔다). 상자는 복사돼도 **같은 상자**를
 # 가리키므로, 밖에서 start_run() 으로 상자를 만들어 두면 노드가 넣은 값이 밖에서 보인다.
 _CURRENT_RUN: ContextVar[dict | None] = ContextVar("current_run", default=None)
-KST = timezone(timedelta(hours=9))
 
 
 # 모델별 백만 토큰당 (입력, 출력) 요금 USD. 2026-09-25 공식 문서 기준.
@@ -162,7 +161,7 @@ def record(
         )
         return
 
-    now = datetime.now(KST)
+    now = datetime.now(dates.KST)
     provider = model.split("-")[0]
     path = _unique_path(CALL_DIR, f"{now:%y%m%d-%H%M%S}-{provider}")
     filename = path.name
@@ -228,7 +227,7 @@ def record_generation(
     # request_id 는 백엔드가 정한다 (계약 형식은 "123-0"). 경로 문자가 섞여도 폴더 밖에 쓰지 않게
     safe_id = re.sub(r"[^\w-]", "_", request_id)
     path = _unique_path(GENERATION_DIR, f"{accepted_at:%y%m%d-%H%M%S}-{safe_id}")
-    finished_at = datetime.now(KST)
+    finished_at = datetime.now(dates.KST)
 
     detail = {
         "request_id": request_id,

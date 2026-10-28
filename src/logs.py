@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
-KST = timezone(timedelta(hours=9))
+from src import dates
 
 
 def write(level: str, event: str, **fields: object) -> None:
@@ -29,7 +29,7 @@ def write(level: str, event: str, **fields: object) -> None:
     나머지 칸은 부르는 쪽이 정한다. JSON 으로 못 바꾸는 값(날짜 등)은 문자열로 적는다.
     """
     line = {
-        "time": datetime.now(KST).isoformat(timespec="milliseconds"),
+        "time": datetime.now(dates.KST).isoformat(timespec="milliseconds"),
         "level": level,
         "event": event,
     }

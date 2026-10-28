@@ -10,6 +10,8 @@ src/dates.py
 모아 둔 이유: 같은 변환을 여러 곳(nodes · adapter · llm_arrange · fake_llm)이 쓴다 —
 한 곳에 두어 형식이 갈라지지 않게.
 
+시간대 KST 도 여기 둔다 — 로그·기록·작업이 같이 쓰고, 서로를 끌어오지 않게.
+
 **화면에 보이는 모양(`10/12`·`2026.10.12`)은 여기 없다.** 그건 형식 변환이 아니라
 표시 방식이고, 바뀌는 이유도 다르다 (output/book_html.py 의 일이다).
 
@@ -19,11 +21,12 @@ src/dates.py
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 BACKEND_FORMAT = "%y.%m.%d"
 TOURAPI_FORMAT = "%Y%m%d"
 ISO_FORMAT = "%Y-%m-%d"
+KST = timezone(timedelta(hours=9))
 
 
 def parse_backend(value: str) -> date:
@@ -34,6 +37,11 @@ def parse_backend(value: str) -> date:
 def parse_iso(value: str) -> date:
     """'2026-10-12' -> date(2026, 10, 12)."""
     return datetime.strptime(value, ISO_FORMAT).date()
+
+
+def parse_tourapi(value: str) -> date:
+    """'20261012' -> date(2026, 10, 12)."""
+    return datetime.strptime(value, TOURAPI_FORMAT).date()
 
 
 def to_backend(day: date) -> str:

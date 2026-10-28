@@ -21,7 +21,7 @@ import traceback
 import uuid
 from datetime import datetime, timedelta
 
-from src import logs, metrics
+from src import dates, logs, metrics
 from src.engine import graph, nodes
 from src.engine.nodes import FeedbackNotApplicable, InsufficientCandidates
 from src.llm import calllog
@@ -126,7 +126,7 @@ def accept(
         "fingerprint": mark,
         "request_id": request_id,
         "request": request,
-        "accepted_at": datetime.now(calllog.KST),
+        "accepted_at": datetime.now(dates.KST),
     }
     _enqueue(job)
     return job
@@ -162,7 +162,7 @@ def accept_regeneration(
         "fingerprint": mark,
         "request_id": request_id,
         "request": request,
-        "accepted_at": datetime.now(calllog.KST),
+        "accepted_at": datetime.now(dates.KST),
     }
     _enqueue(job)
     return job
@@ -189,7 +189,7 @@ def _purge_expired() -> None:
     접수한 지 JOB_TTL 이 지난 끝난 작업을 지운다.
     지우지 않으면 서버를 내릴 때까지 메모리에 쌓인다.
     """
-    now = datetime.now(calllog.KST)
+    now = datetime.now(dates.KST)
     for job_id, job in list(jobs.items()):
         if job["status"] not in ("completed", "failed"):
             continue
