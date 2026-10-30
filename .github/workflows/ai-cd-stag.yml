@@ -22,9 +22,9 @@ jobs:
     env:
       AWS_REGION: ap-northeast-2
       IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ktb4-10-ai
-      ECS_CLUSTER: kgb-stag-cluster
-      ECS_SERVICE: kgb-stag-ai
-      ECS_TASK_FAMILY: kgb-stag-ai
+      ECS_CLUSTER: kgb-staging-cluster
+      ECS_SERVICE: kgb-staging-ai
+      ECS_TASK_FAMILY: kgb-staging-ai
       ECS_CONTAINER: ai
 
     steps:
