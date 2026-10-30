@@ -10,6 +10,11 @@ permissions:
   packages: write
   id-token: write
 
+# main 배포는 겹치지 않게 한 번에 하나씩, 진행 중인 배포는 중단하지 않는다.
+concurrency:
+  group: ai-cd
+  cancel-in-progress: false
+
 jobs:
   ai-cd:
     runs-on: ubuntu-latest
@@ -39,23 +44,32 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Image Tag 생성
-      - name: Generate Image Tag
+      # 스테이징에서 배포 성공한 이미지 찾기
+      # tree-<트리 해시>: dev 를 그대로 merge 했으면 main 의 트리 해시도 같음
+      # 없으면 (main 에 직접 들어간 변경 등) 검증 안 된 이미지라 배포 중단
+      # 급한 수정도 dev 에 먼저 merge 해서 스테이징을 거친 뒤 main 으로
+      - name: Find Verified Image
         id: image
         run: |
+          TREE=$(git rev-parse HEAD^{tree} | cut -c1-12)
+          TREE_URI="${IMAGE_NAME}:tree-${TREE}"
+
+          if ! docker buildx imagetools inspect "${TREE_URI}" > /dev/null 2>&1; then
+            echo "::error::스테이징에서 검증된 이미지가 없습니다: ${TREE_URI}"
+            exit 1
+          fi
+
           SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
           DATE=$(TZ="Asia/Seoul" date +%Y%m%d)
+          echo "tree_uri=${TREE_URI}" >> "$GITHUB_OUTPUT"
           echo "uri=${IMAGE_NAME}:${SHORT_SHA}-${DATE}" >> "$GITHUB_OUTPUT"
 
-      # AI Docker Image Build
-      - name: Build Docker Image
+      # 스테이징 이미지에 prod 태그만 추가
+      - name: Promote Image
         run: |
-          docker build -t "${{ steps.image.outputs.uri }}" .
-
-      # Build한 Image를 GHCR에 저장
-      - name: Push Docker Image
-        run: |
-          docker push "${{ steps.image.outputs.uri }}"
+          docker buildx imagetools create \
+            -t "${{ steps.image.outputs.uri }}" \
+            "${{ steps.image.outputs.tree_uri }}"
 
       # --------------------------------
       # Deploy

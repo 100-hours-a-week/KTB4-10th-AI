@@ -1,0 +1,114 @@
+name: KGB AI CD (staging)
+
+on:
+  push:
+    branches:
+      - dev
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+# dev 에 연속 merge되면 마지막 것만 배포
+concurrency:
+  group: ai-cd-stag
+  cancel-in-progress: true
+
+jobs:
+  ai-cd-stag:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: ap-northeast-2
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ktb4-10-ai
+      ECS_CLUSTER: kgb-stag-cluster
+      ECS_SERVICE: kgb-stag-ai
+      ECS_TASK_FAMILY: kgb-stag-ai
+      ECS_CONTAINER: ai
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --------------------------------
+      # Docker Image Build & Push
+      # --------------------------------
+
+      # GHCR 로그인
+      # GITHUB_TOKEN은 Workflow 실행 시 GitHub가 제공
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Image Tag 생성
+      # tree-<트리 해시>: 파일 내용이 같으면 커밋이 달라도 같은 값
+      # stag-<sha>-<날짜>
+      - name: Generate Image Tag
+        id: image
+        run: |
+          TREE=$(git rev-parse HEAD^{tree} | cut -c1-12)
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          DATE=$(TZ="Asia/Seoul" date +%Y%m%d)
+          echo "tree_uri=${IMAGE_NAME}:tree-${TREE}" >> "$GITHUB_OUTPUT"
+          echo "uri=${IMAGE_NAME}:stag-${SHORT_SHA}-${DATE}" >> "$GITHUB_OUTPUT"
+
+      # AI Docker Image Build
+      - name: Build Docker Image
+        run: |
+          docker build -t "${{ steps.image.outputs.uri }}" .
+
+      # Build한 Image를 GHCR에 저장
+      - name: Push Docker Image
+        run: |
+          docker push "${{ steps.image.outputs.uri }}"
+
+      # --------------------------------
+      # Deploy
+      # --------------------------------
+
+      # GitHub OIDC를 통해 AWS IAM Role Assume
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ECS_STAG_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 최신 Task Definition 다운로드
+      - name: Download Task Definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${ECS_TASK_FAMILY}" \
+            --query taskDefinition > task-definition.json
+
+          echo "Base: $(jq -r '.taskDefinitionArn' task-definition.json)"
+
+      # 이미지 교체
+      - name: Render Task Definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.ECS_CONTAINER }}
+          image: ${{ steps.image.outputs.uri }}
+
+      # 새 리비전 등록 후 서비스 업데이트, 안정화까지 대기
+      # 실패 시 ECS Circuit Breaker가 이전 리비전으로 자동 롤백
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      # 배포 성공한 이미지에만 tree 태그 추가 → main 배포 때 이 태그로 찾아 promotion
+      - name: Tag Verified Image
+        run: |
+          docker buildx imagetools create \
+            -t "${{ steps.image.outputs.tree_uri }}" \
+            "${{ steps.image.outputs.uri }}"
