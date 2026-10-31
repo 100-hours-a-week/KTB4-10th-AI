@@ -47,11 +47,15 @@ WRITE_TIMEOUT = 120
 # = 538초가 작업 상한 600초 안
 VLLM_WRITE_TIMEOUT = 240
 
-# 자체 모델 학습 데이터가 overview 를 200자로 잘라 넣었다. 입력 모양을 그와 같게 둔다.
-# 백엔드는 300자까지 보낸다 (2026-10-16)
+# _cut_overview 의 길이. 자체 모델 학습 데이터가 overview 를 200자로 잘라 넣었다.
+# 서버는 2026-10-31 부터 백엔드가 보내는 전체를 넣는다 (_full_overview)
 OVERVIEW_MAX_CHARS = 200
 # 마지막 마침표가 이보다 앞이면 문장에서 끊지 않는다 — 재료가 너무 짧아진다
 OVERVIEW_MIN_SENTENCE_CHARS = 100
+# TourAPI 소개글 일부에 공지가 HTML·CSS 째로 들어 있다 (청송 산불 안내 — 2026-10-31).
+# 태그는 영문자로 시작하는 것만 — 「<토지>」 같은 책 제목 꺾쇠까지 지우지 않게
+HTML_TAG = re.compile(r"</?[a-zA-Z][^>]*>")
+CSS_BLOCK = re.compile(r"\.[\w-]+\s*\{[^}]*\}")
 
 SYSTEM_PROMPT = """당신은 여행 가이드북 문구를 쓰는 작가입니다.
 
@@ -207,7 +211,7 @@ def _place_entry(item: PlanItem, candidate: Candidate, detail_codes: list[str]) 
         "taste": taste_label(candidate.category_code, detail_codes),
         "start_time": item.start_time,
         "duration_minutes": item.duration_minutes,
-        "overview": _cut_overview(candidate.overview),
+        "overview": _full_overview(candidate.overview),
     }
     if candidate.pick == "event":
         entry["event_start_date"] = shown["event_start_date"]
@@ -240,9 +244,30 @@ def taste_label(category_code: str, detail_codes: list[str]) -> str:
     return "취향 밖"
 
 
+def _full_overview(overview: str) -> str:
+    """자르지 않고 전체를 넘긴다. 마크업을 지우고 공백을 한 칸으로."""
+    cleaned = _strip_markup(overview)
+    flattened = re.sub(r"\s+", " ", cleaned).strip()
+    return flattened
+
+
+def _strip_markup(overview: str) -> str:
+    """
+    태그와 CSS 를 지운다. 태그 안의 글(「※ 산불로 전소…」)은 남긴다 — 글쓰기가 읽어야 할 안내다.
+    지운 자리는 빈칸으로 둔다 — 「</div>이 집은」의 앞뒤 글자가 붙지 않게.
+    """
+    without_css = CSS_BLOCK.sub(" ", overview)
+    without_tags = HTML_TAG.sub(" ", without_css)
+    return without_tags
+
+
 def _cut_overview(overview: str) -> str:
-    """앞 200자로 자르되, 그 안에 마침표가 있으면 그 문장까지 (100자 이상일 때)."""
-    flattened = re.sub(r"\s+", " ", overview).strip()
+    """
+    앞 200자로 자르되, 그 안에 마침표가 있으면 그 문장까지 (100자 이상일 때).
+    마크업을 먼저 지운다 — 남겨 두면 200자 중 절반을 태그·CSS 가 차지한다.
+    """
+    cleaned = _strip_markup(overview)
+    flattened = re.sub(r"\s+", " ", cleaned).strip()
     head = flattened[:OVERVIEW_MAX_CHARS]
     last_period = head.rfind(".")
     if last_period >= OVERVIEW_MIN_SENTENCE_CHARS:
