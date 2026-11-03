@@ -1,13 +1,13 @@
 """
 src/engine/graph.py
 
-노드 6개를 그래프로 잇는다. 노드 순서를 아는 곳은 여기뿐이다.
+노드 7개를 그래프로 잇는다. 노드 순서를 아는 곳은 여기뿐이다.
 
-    prepare ─┬─> find_places ─┬─> arrange ──> write ──> build
+    prepare ─┬─> find_places ─┬─> filter_closed ──> arrange ──> write ──> build
              └─> find_events ─┘
 
 find_places와 find_events는 State의 다른 칸에 쓰므로 병렬로 돈다.
-langgraph가 둘 다 끝나기를 기다렸다가 arrange로 넘긴다.
+langgraph가 둘 다 끝나기를 기다렸다가 filter_closed 로 넘긴다 (방문할 수 없는 곳을 뺀다, #74).
 arrange 가 배치를, write 가 문구를 모델에게 받는다 (2026-10-15 에 plan 하나를 나눴다, #35).
 """
 
@@ -22,7 +22,11 @@ from src.models import Candidate, GraphState, Itinerary, PlanItem, TripRequest
 
 # 이 노드가 끝나면 다음 단계가 시작된다. 서버가 백엔드에 진행 상황을 알리는 데 쓴다
 # (src/server/callback.py). 나머지 노드는 순식간이라 단계로 나누지 않는다
-STEP_AFTER_NODE = {"prepare": "arranging", "arrange": "writing"}
+STEP_AFTER_NODE = {
+    "prepare": "checking",
+    "filter_closed": "arranging",
+    "arrange": "writing",
+}
 
 
 def build_graph():
@@ -32,6 +36,7 @@ def build_graph():
     graph.add_node("prepare", nodes.prepare)
     graph.add_node("find_places", nodes.find_places)
     graph.add_node("find_events", nodes.find_events)
+    graph.add_node("filter_closed", nodes.filter_closed)
     graph.add_node("arrange", nodes.arrange)
     graph.add_node("write", nodes.write)
     graph.add_node("build", nodes.build)
@@ -39,8 +44,9 @@ def build_graph():
     graph.add_edge(START, "prepare")
     graph.add_edge("prepare", "find_places")  # 팬아웃 — 둘이 함께 출발한다
     graph.add_edge("prepare", "find_events")
-    graph.add_edge("find_places", "arrange")  # 합류 — 둘 다 끝나야 시작된다
-    graph.add_edge("find_events", "arrange")
+    graph.add_edge("find_places", "filter_closed")  # 합류 — 둘 다 끝나야 시작된다
+    graph.add_edge("find_events", "filter_closed")
+    graph.add_edge("filter_closed", "arrange")
     graph.add_edge("arrange", "write")
     graph.add_edge("write", "build")
     graph.add_edge("build", END)
@@ -54,6 +60,7 @@ def run(
     places: list[Candidate],
     events: list[Candidate],
     on_step: Callable[[str], None] | None = None,
+    on_filtered: Callable[[list[Candidate], list[Candidate]], None] | None = None,
 ) -> Itinerary:
     """
     조건 하나를 받아 일정 하나를 돌려준다. 생성의 진입점이다. 재생성은 run_regeneration.
@@ -65,13 +72,15 @@ def run(
     그 규칙은 후보 출처와 무관하다.
 
     `on_step` 은 단계가 바뀔 때 단계 이름으로 부를 함수다. 안 넘기면 알리지 않는다.
+    `on_filtered` 는 filter_closed 가 걸러 낸 장소·행사로 부를 함수다 — 서버가 작업에 남겨
+    재생성이 그 안에서 다시 고르게 한다.
     """
     state = {
         "request": request,
         "given_places": places,
         "given_events": events,
     }
-    return _run_graph(state, on_step)
+    return _run_graph(state, on_step, on_filtered)
 
 
 def run_regeneration(
@@ -94,7 +103,11 @@ def run_regeneration(
     return _run_graph(state, on_step)
 
 
-def _run_graph(state: dict, on_step: Callable[[str], None] | None) -> Itinerary:
+def _run_graph(
+    state: dict,
+    on_step: Callable[[str], None] | None,
+    on_filtered: Callable[[list[Candidate], list[Candidate]], None] | None = None,
+) -> Itinerary:
     """
     invoke 대신 stream 으로 돌려 노드가 끝날 때마다 받는다. 그래프가 도는 방식은 같다.
     노드에서 난 예외는 invoke 때처럼 그대로 올라간다.
@@ -104,8 +117,14 @@ def _run_graph(state: dict, on_step: Callable[[str], None] | None) -> Itinerary:
         # 함께 도는 노드(find_places · find_events)는 한 번에 같이 올 수 있다
         for node_name, output in update.items():
             step = STEP_AFTER_NODE.get(node_name)
+            # 재생성은 판정하지 않으므로 「확인 중」을 보내지 않는다
+            if step == "checking" and "feedback" in state:
+                step = None
             if step is not None and on_step is not None:
                 on_step(step)
+            # 재생성은 판정을 건너뛰어 빈 결과(None)가 온다
+            if node_name == "filter_closed" and output and on_filtered is not None:
+                on_filtered(output["places"], output["events"])
             if node_name == "build":
                 result = output["result"]
     return result

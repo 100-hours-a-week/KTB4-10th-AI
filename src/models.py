@@ -59,6 +59,10 @@ class Candidate(BaseModel):
     # 후보 전부에 붙이면 입력이 몇 배가 된다. 없는 곳도 있어 비어도 된다
     overview: str = ""
 
+    # 방문 불가 판정(filter_closed)이 「일부 제한」으로 본 곳의 안내 — 판정 근거가 된 소개글 문장.
+    # 글쓰기(Claude)에만 넣는다. 판정 전이거나 제한이 없으면 비어 있다
+    notice: str = ""
+
 
 class PlanItem(BaseModel):
     """

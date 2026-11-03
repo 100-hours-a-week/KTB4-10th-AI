@@ -36,6 +36,7 @@ SHUTDOWN_WAIT = 10
 
 # 문구는 FE 와 정하면 바꾼다 (지금은 백엔드 예시 문구 기준)
 PROGRESS_MESSAGES = {
+    "checking": "방문할 수 있는 곳을 확인하고 있어요.",
     "arranging": "여행 일정을 구성하고 있어요.",
     "writing": "가이드북 문구를 작성하고 있어요.",
 }

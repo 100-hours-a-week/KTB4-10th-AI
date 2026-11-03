@@ -56,12 +56,19 @@ CLAUDE_PRICING = {
     "claude-opus-5-5": (4, 20),
     "claude-sonnet-5": (2, 10),
     "claude-haiku-4-5": (1, 5),
+    # 방문 불가 판정(filter_closed)이 쓴다. 입력 10만 토큰 이하 구간의 요금 (2026-11-03)
+    "claude-haiku-5-5": (0.10, 0.50),
 }
+
+# Haiku 5.5 는 한 번에 보낸 입력이 이보다 크면 입력·출력 단가가 다 5배다.
+# 요금표는 한 구간만 담으므로 넘으면 비용을 비운다 — 판정 묶음(50곳)은 3만 남짓이라 넘지 않는다
+HAIKU_5_5_TIER_INPUT = 100_000
 
 
 def claude_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
     """
     호출 한 건의 대략 비용. 요금표에 없는 모델이면 **None**.
+    Haiku 5.5 의 입력이 HAIKU_5_5_TIER_INPUT 을 넘어도 None (요금이 다른 구간).
 
     모르는 모델에 아무 요금이나 곱하지 않는 이유: 나중에 기록을 합산할 때
     틀린 숫자가 섞이면 비어 있는 것보다 나쁘다. 비어 있으면 눈에 띄지만
@@ -69,6 +76,8 @@ def claude_cost(model: str, input_tokens: int, output_tokens: int) -> float | No
     """
     price = CLAUDE_PRICING.get(model)
     if price is None:
+        return None
+    if model == "claude-haiku-5-5" and input_tokens > HAIKU_5_5_TIER_INPUT:
         return None
 
     input_per_mtok, output_per_mtok = price

@@ -32,7 +32,8 @@ from src.llm.llm_client import LLMError
 from src.models import Candidate, DayPlanDraft, PlanDraftItem, TripRequest
 
 # 배치 호출 한 건의 상한. SDK 는 **시간 초과도 재시도**하므로 시간 초과가 두 번
-# 이어지면 140 × 2 + 재시도 대기(이때는 8초 이하) = 288초다. 여기에 워커 확인(10초)과
+# 이어지면 140 × 2 + 재시도 대기(이때는 8초 이하) = 288초다. 여기에
+# 판정(closed_judge.JUDGE_TIMEOUT, 재시도 없음) · 워커 확인(10초) ·
 # 글쓰기 호출의 최악(llm_write.WRITE_TIMEOUT · VLLM_WRITE_TIMEOUT)을 더한 값이
 # 서버의 작업 타임아웃(jobs.JOB_TIMEOUT)보다 짧아야
 # 작업이 실패로 접힌 뒤 실이 혼자 계속 돌지 않는다.

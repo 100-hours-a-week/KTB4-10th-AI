@@ -52,8 +52,8 @@ WRITE_TIMEOUT = 120
 
 # 런팟 vLLM 글쓰기의 상한. L4 에서 초당 약 15토큰이라 학습 데이터 최장 답(2,659토큰)이
 # 약 177초 걸린다 — 120초면 긴 일정이 실패했다 (2026-10-17, 7일 35곳).
-# 재시도는 없다(vllm_client.VLLM_MAX_RETRIES) — 배치 최악 288초 + 워커 확인 10초 + 240초
-# = 538초가 작업 상한 600초 안
+# 재시도는 없다(vllm_client.VLLM_MAX_RETRIES) — 배치 최악 288초 + 판정 45초 + 워커 확인 10초
+# + 240초 = 583초가 작업 상한 600초 안
 VLLM_WRITE_TIMEOUT = 240
 
 # _cut_overview 의 길이. 자체 모델 학습 데이터가 overview 를 200자로 잘라 넣었다.
@@ -105,6 +105,8 @@ _REASONS = """- reasons — places 의 **content_id 마다 하나씩.**
   overview_summary 는 그 장소의 overview 를 **2문장**으로 요약합니다. 한 문장에 사실 하나씩,
   전체 200자를 넘지 않게 씁니다. overview 에 있는 사실만 쓰고 여행자의 조건은 넣지 않습니다.
   휴관·소실 같은 안내가 있으면 요약에 넣습니다. overview 가 비어 있으면 빈 문자열("")로 둡니다.
+  place 에 notice 가 있으면 지금 방문할 때의 제한입니다. 요약에 넣고,
+  reason 은 그 제한과 어긋나게 권하지 마세요 (예: 일부 소실인데 "잘 보존되어").
   reason 은 그 장소의 이름을 넣어 **1문장**으로, 100자를 넘지 않게 씁니다.
   reason 은 장소 소개가 아니라 **이 여행자에게 왜 이곳인지**입니다.
   이 장소의 구체적인 점 하나(분류·overview 에 있는 것)를 골라, 그것이 이 여행자의 조건에
@@ -192,12 +194,19 @@ def write_all(
                 conditions=conditions,
             )
         else:
-            payload = _plan_to_payload(
-                plan, candidates, start, day_count, conditions, trip.detail_codes
-            )
             # vllm 이어도 워커가 없으면 Claude 로 쓴다 — vLLM 을 정한 시간대에만 켜 둔다
             use_vllm = (
                 vllm_client.write_backend() == "vllm" and vllm_client.worker_ready()
+            )
+            # vLLM 은 학습 때 못 본 칸(notice)을 받지 않는다
+            payload = _plan_to_payload(
+                plan,
+                candidates,
+                start,
+                day_count,
+                conditions,
+                trip.detail_codes,
+                with_notice=not use_vllm,
             )
             if use_vllm:
                 draft = _vllm_write_all(payload, trip)
@@ -228,6 +237,7 @@ def _plan_to_payload(
     day_count: int,
     conditions: dict,
     detail_codes: list[str],
+    with_notice: bool = False,
 ) -> str:
     """
     배치된 곳만 날짜별로 묶어 JSON 으로 만든다. 모양은 v7 학습 데이터의 입력과 같다.
@@ -239,7 +249,7 @@ def _plan_to_payload(
     for day in range(1, day_count + 1):
         # plan 은 nodes.number_by_time 이 일차·차례 순으로 세워 두었다
         places = [
-            _place_entry(item, by_id[item.content_id], detail_codes)
+            _place_entry(item, by_id[item.content_id], detail_codes, with_notice)
             for item in plan
             if item.day == day
         ]
@@ -255,7 +265,12 @@ def _plan_to_payload(
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _place_entry(item: PlanItem, candidate: Candidate, detail_codes: list[str]) -> dict:
+def _place_entry(
+    item: PlanItem,
+    candidate: Candidate,
+    detail_codes: list[str],
+    with_notice: bool = False,
+) -> dict:
     """
     배치된 곳 한 줄. 칸과 순서를 v7 학습 데이터의 입력과 같게 둔다 — 글쓰기를 자체 모델로
     바꿀 때 학습 때와 같은 모양을 보이려고. 배치의 fit 대신 taste 를 넣는다.
@@ -275,6 +290,9 @@ def _place_entry(item: PlanItem, candidate: Candidate, detail_codes: list[str]) 
     if candidate.pick == "event":
         entry["event_start_date"] = shown["event_start_date"]
         entry["event_end_date"] = shown["event_end_date"]
+    # 방문 불가 판정이 일부 제한으로 본 곳만 (nodes.filter_closed)
+    if with_notice and candidate.notice:
+        entry["notice"] = candidate.notice
     return entry
 
 
