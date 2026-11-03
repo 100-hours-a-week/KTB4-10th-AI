@@ -31,7 +31,7 @@ from src.server import adapter, callback
 
 MAX_CONCURRENCY = 3  # 동시에 LLM 을 부르는 작업 수. 분당 한도를 아직 모른다
 MAX_QUEUE = 100
-# 작업 하나에 최대 10분. 배치·글쓰기 호출의 최악을 더한 것보다 길어야 한다
+# 작업 하나에 최대 10분. 배치·판정·글쓰기 호출의 최악을 더한 것보다 길어야 한다
 # (계산은 llm_arrange.ARRANGE_TIMEOUT 주석, 확인은 test_observability)
 JOB_TIMEOUT = 600
 # 끝난 작업을 남겨 두는 시간. 결과 가져가기·같은 요청 재전송보다 넉넉하게
@@ -308,6 +308,11 @@ async def _generate(job: dict) -> Itinerary:
     def on_step(step: str) -> None:
         loop.call_soon_threadsafe(callback.notify_progress, job, step)
 
+    # 걸러 낸 후보로 바꿔 둔다 — 재생성이 이 작업의 후보를 복사해 그 안에서 다시 고른다
+    def on_filtered(places: list, events: list) -> None:
+        job["places"] = places
+        job["events"] = events
+
     if "source_job_id" in job:
         return await asyncio.to_thread(_regenerate, job, on_step)
     return await asyncio.to_thread(
@@ -316,6 +321,7 @@ async def _generate(job: dict) -> Itinerary:
         places=job["places"],
         events=job["events"],
         on_step=on_step,
+        on_filtered=on_filtered,
     )
 
 

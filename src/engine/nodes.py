@@ -11,9 +11,9 @@ from __future__ import annotations
 import collections
 from datetime import timedelta
 
-from src import dates
+from src import dates, logs
 from src.engine import data, distance
-from src.llm import llm_arrange, llm_regenerate, llm_write
+from src.llm import closed_judge, llm_arrange, llm_regenerate, llm_write
 from src.models import (
     Candidate,
     Coordinates,
@@ -197,6 +197,41 @@ def find_events(state: GraphState) -> dict:
     )
 
     return {"events": events}
+
+
+# ============================================================
+# 3-1. filter_closed — 방문할 수 없는 곳을 배치 전에 뺀다 (#74)
+# ============================================================
+
+
+def filter_closed(state: GraphState) -> dict:
+    """
+    전체 불가는 빼고, 일부 제한은 안내(notice)를 붙인다. 판정이 없는 곳은 그대로 둔다.
+    재생성은 처음 작업이 걸러 둔 후보를 받으므로 다시 판정하지 않는다.
+    """
+    if "feedback" in state:
+        return {}
+
+    places = state["places"]
+    events = state["events"]
+    verdicts = closed_judge.judge_all(events + places)
+
+    kept_places = _apply_verdicts(places, verdicts)
+    kept_events = _apply_verdicts(events, verdicts)
+    removed = len(places) + len(events) - len(kept_places) - len(kept_events)
+    logs.write("INFO", "closed_filter", judged=len(verdicts), removed=removed)
+    return {"places": kept_places, "events": kept_events}
+
+
+def _apply_verdicts(candidates: list[Candidate], verdicts: dict) -> list[Candidate]:
+    kept = []
+    for candidate in candidates:
+        verdict = verdicts.get(candidate.content_id)
+        if verdict is None or verdict.status == "상관없음":
+            kept.append(candidate)
+        elif verdict.status == "일부 제한":
+            kept.append(candidate.model_copy(update={"notice": verdict.evidence}))
+    return kept
 
 
 # ============================================================

@@ -82,12 +82,14 @@ def call_and_record(
     output_format,
     timeout: int,
     request: dict,
+    max_retries: int = CLAUDE_MAX_RETRIES,
 ):
     """
     Claude 를 1회 부르고 호출 기록을 남긴다. [비용 발생]
 
     배치와 글쓰기(llm_write)가 같이 쓴다 — 기록·비용 계산이 두 벌로 갈라지지 않게.
     request 는 기록에 남길 입력이다 (모델에게 보내는 것은 system · payload).
+    max_retries 는 방문 불가 판정(closed_judge)만 0 으로 바꾼다 — 작업 상한에 남은 시간이 짧다.
     """
     # 파일 맨 위가 아니라 여기서 불러온다 — 실제로 부를 때만 SDK 가 올라오고,
     # 가짜 모드 서버와 테스트는 아예 불러오지 않는다 (불러오기 0.3초쯤, 10-27 측정)
@@ -96,7 +98,7 @@ def call_and_record(
     client = anthropic.Anthropic(
         api_key=load_api_key(ANTHROPIC_KEY_VAR),
         timeout=timeout,
-        max_retries=CLAUDE_MAX_RETRIES,
+        max_retries=max_retries,
     )
 
     started = time.monotonic()
