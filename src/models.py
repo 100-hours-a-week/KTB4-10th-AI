@@ -132,17 +132,56 @@ class Reason(BaseModel):
     reason: str
 
 
+class SummaryAndReason(BaseModel):
+    """
+    Claude 글쓰기의 장소 하나. 소개글 요약을 먼저, 추천 이유를 마지막에 쓰게 한다 —
+    모델은 칸 순서대로 쓰므로 이유가 방금 쓴 요약에서 근거를 가져온다 (2026-10-31).
+    """
+
+    content_id: str
+    overview_summary: str  # overview 가 비면 ""
+    reason: str
+
+
 class WriterDraft(BaseModel):
     """
     글쓰기(write) 응답. 배치가 끝난 일정을 받아 문구만 쓴다.
 
-    모양을 자체 모델 학습 데이터(samples/open_model/label_inputs_v7.jsonl)의 출력과
-    같게 둔다 — write 를 자체 모델로 바꿀 때 받는 쪽을 고치지 않으려고.
+    vLLM 은 V7WriterDraft 로 받아 이 모양으로 맞춘다 (llm_write._vllm_write_all).
     기본값이 없는 이유는 빠뜨린 칸이 빈 값으로 나가지 않고 검증에서 멈추게 하려는 것.
     """
 
     title: str  # 가이드북 제목. 계약 상한 15자
     intro: str  # 여행 하나를 한 문장으로. 계약의 result.summary 자리
+    days: list[DayDraft]
+    reasons: list[SummaryAndReason]
+
+
+class DayWriterDraft(BaseModel):
+    """
+    날짜별로 나눠 쓸 때 하루치 답 (src/llm/write_by_day.py). 일차 번호는 부르는 쪽이
+    알고 있어 받지 않는다 — 받으면 '어느 쪽이 맞나'가 생긴다.
+    """
+
+    summary: str
+    reasons: list[SummaryAndReason]
+
+
+class CoverDraft(BaseModel):
+    """날짜별로 나눠 쓸 때 표지 답 — 제목과 여행 소개."""
+
+    title: str
+    intro: str
+
+
+class V7WriterDraft(BaseModel):
+    """
+    vLLM(자체 모델) 글쓰기 응답. 학습 데이터(samples/open_model/label_inputs_v7.jsonl)의
+    출력 모양 그대로 — 요약 칸이 없다. 학습 때 보지 못한 칸을 시키지 않으려고 따로 둔다.
+    """
+
+    title: str
+    intro: str
     days: list[DayDraft]
     reasons: list[Reason]
 
@@ -170,6 +209,8 @@ class PlannedPlace(BaseModel):
     # pick(interest/filler/event)은 응답에 넣지 않는다 — 후보를 고르는 내부 근거이지
     # 백엔드가 알아야 할 값이 아니다. Candidate.pick 은 그대로 두고 여기서만 뺀다.
     recommend_reason: str
+    # 소개글 요약 — 가이드북에만 싣는다. 백엔드 응답 JSON 에는 넣지 않는다 (2026-10-31)
+    overview_summary: str = ""
     event_end_date: Optional[str] = None
 
     # 직전 장소에서 여기까지의 **직선** 거리. 그날 첫 장소는 None.
@@ -267,5 +308,6 @@ class GraphState(TypedDict, total=False):
     intro: str
     day_summaries: dict[int, str]  # 일차 → 그날 요약
     reasons: dict[str, str]  # content_id → 추천 이유
+    overview_summaries: dict[str, str]  # content_id → 소개글 요약
 
     result: Itinerary  # build

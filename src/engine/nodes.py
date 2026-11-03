@@ -283,11 +283,15 @@ def write(state: GraphState) -> dict:
 
     day_summaries = {day.day: day.summary for day in draft.days}
     reasons = {reason.content_id: reason.reason for reason in draft.reasons}
+    overview_summaries = {
+        reason.content_id: reason.overview_summary for reason in draft.reasons
+    }
     return {
         "title": draft.title,
         "intro": draft.intro,
         "day_summaries": day_summaries,
         "reasons": reasons,
+        "overview_summaries": overview_summaries,
     }
 
 
@@ -366,7 +370,7 @@ def plan_from_itinerary(itinerary: Itinerary) -> list[PlanItem]:
 
 
 def _to_planned_place(
-    item: PlanItem, candidate: Candidate, reason: str
+    item: PlanItem, candidate: Candidate, reason: str, overview_summary: str
 ) -> PlannedPlace:
     """배치값·추천 이유와 우리 사실 데이터를 한 건으로 합친다. 출력 필드가 늘면 고칠 곳."""
     coordinates = None
@@ -379,6 +383,7 @@ def _to_planned_place(
         start_time=item.start_time,
         duration_minutes=item.duration_minutes,
         recommend_reason=reason,
+        overview_summary=overview_summary,
         # 우리가 갖고 있던 것 — LLM을 거치지 않는다
         content_id=candidate.content_id,
         name=candidate.name,
@@ -462,7 +467,9 @@ def build(state: GraphState) -> dict:
     for item in sorted(state["plan"], key=lambda i: (i.day, i.order)):
         candidate = by_id[item.content_id]
         reason = state["reasons"][item.content_id]
-        days.setdefault(item.day, []).append(_to_planned_place(item, candidate, reason))
+        overview_summary = state["overview_summaries"][item.content_id]
+        planned = _to_planned_place(item, candidate, reason, overview_summary)
+        days.setdefault(item.day, []).append(planned)
 
     day_summaries = state["day_summaries"]
     itinerary = [

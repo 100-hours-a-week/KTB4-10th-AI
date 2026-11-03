@@ -185,11 +185,17 @@ def _place(day: ItineraryDay, place: PlannedPlace) -> str:
         # 따로 한 줄을 두면 긴 행사 이름(제목 2줄)과 겹쳐 쪽이 넘친다
         category += f" · 행사 {_month_day(place.event_end_date)}까지"
 
+    # vLLM 글쓰기 · overview 없는 곳은 요약이 비어 있다 — 빈 단락을 그리지 않는다
+    about = ""
+    if place.overview_summary:
+        about = f'<div class="about">{_text(place.overview_summary)}</div>'
+
     return (
         f'{photo}<div class="pad"><span class="badge">DAY {day.day} · {_text(when)}</span>'
         f"<h3>{_text(place.name)}</h3>"
         f'<div class="info">{category}</div>'
         f'<div class="info">{_text(place.address)}</div>'
+        f"{about}"
         f'<div class="why"><b>WHY HERE</b>{_text(place.recommend_reason)}</div></div>'
     )
 
@@ -518,6 +524,7 @@ h2 { font-size:24px; margin:6px 0 18px; line-height:1.3; }
 }
 .place h3 { font-size:22px; margin:10px 0 4px; }
 .place .info { font-size:13px; color:var(--sub); }
+.about { margin-top:14px; font-size:14px; line-height:1.6; }
 .why { margin-top:16px; padding-left:14px; border-left:3px solid var(--accent); font-size:15px; }
 .why b {
   display:block;

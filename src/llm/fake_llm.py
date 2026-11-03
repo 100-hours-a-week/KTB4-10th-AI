@@ -33,8 +33,8 @@ from src.models import (
     DayPlanDraft,
     PlanDraftItem,
     PlanItem,
-    Reason,
     RegenerateDraft,
+    SummaryAndReason,
     WriterDraft,
 )
 
@@ -171,7 +171,11 @@ def write_all(
         for day in range(1, day_count + 1)
     ]
     reasons = [
-        Reason(content_id=candidate.content_id, reason=_fake_reason(candidate))
+        SummaryAndReason(
+            content_id=candidate.content_id,
+            overview_summary=f"{candidate.name} 소개 요약입니다.",
+            reason=_fake_reason(candidate),
+        )
         for bucket in buckets
         for candidate in bucket
     ]

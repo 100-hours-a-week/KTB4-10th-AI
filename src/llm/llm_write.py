@@ -2,7 +2,8 @@
 src/llm/llm_write.py
 
 **가이드북 문구를 쓰는 모델 호출 (write).** 배치(llm_arrange.arrange_all)가 끝난 일정을 받아
-제목·소개·하루 요약·추천 이유를 한 번에 쓴다. 날짜·순서·시각은 바꾸지 않는다.
+제목·소개·하루 요약·추천 이유를 쓴다. 날짜·순서·시각은 바꾸지 않는다.
+Claude 는 날짜별로 나눠 동시에 쓴다(write_by_day, 2026-10-31). vLLM · 가짜는 한 번에 쓴다.
 
 배치와 나눈 이유 (2026-10-15, #35): 글의 근거로 장소 소개글(overview)을 넣는데, 후보
 전부에 붙이면 입력이 몇 배가 된다. 고른 곳에만 붙이려면 배치가 먼저 끝나야 한다.
@@ -35,7 +36,15 @@ from src import metrics
 from src.engine import data
 from src.llm import fake_llm, llm_arrange, llm_client, v7_prompt, vllm_client
 from src.llm.llm_client import LLMError
-from src.models import Candidate, DayDraft, PlanItem, Reason, TripRequest, WriterDraft
+from src.models import (
+    Candidate,
+    DayDraft,
+    PlanItem,
+    SummaryAndReason,
+    TripRequest,
+    V7WriterDraft,
+    WriterDraft,
+)
 
 # 글쓰기 호출 한 건의 상한 (재시도까지 더한 최악은 llm_arrange.ARRANGE_TIMEOUT 주석).
 # 60초에서는 실호출 글쓰기가 첫 시도에서 자주 넘겼다 (#36)
@@ -57,12 +66,16 @@ OVERVIEW_MIN_SENTENCE_CHARS = 100
 HTML_TAG = re.compile(r"</?[a-zA-Z][^>]*>")
 CSS_BLOCK = re.compile(r"\.[\w-]+\s*\{[^}]*\}")
 
-SYSTEM_PROMPT = """당신은 여행 가이드북 문구를 쓰는 작가입니다.
+# 글쓰기 지시문은 조각을 이어 만든다 — 한 번에 쓰기(SYSTEM_PROMPT)와 날짜별로 나눠 쓰기
+# (DAY_SYSTEM_PROMPT · COVER_SYSTEM_PROMPT)가 같은 규칙을 두 벌로 갖지 않게 (2026-10-31)
+_HEADER = """당신은 여행 가이드북 문구를 쓰는 작가입니다.
 
 여행 조건(trip)과 이미 짜인 일정(days)을 받습니다. 날짜·순서·시각은 정해져 있으니
 바꾸지 말고, 문구만 씁니다.
 
-사실 — 아래 문구 전체에 적용:
+"""
+
+_FACTS = """사실 — 아래 문구 전체에 적용:
 - **입력(이름·분류·주소·overview·행사 기간)에 있는 사실만 씁니다.** 입력에 없는 것은 쓰지 마세요.
   특히 아래는 **overview 에 있을 때만** 씁니다: 역사적 사건·연도, 문화재 지정·번호,
   운영·공연 시각, 요금, 해 지는 시각(노을·일몰·석양), 분위기·풍경(조용한·한적한·운치 있는),
@@ -75,13 +88,24 @@ SYSTEM_PROMPT = """당신은 여행 가이드북 문구를 쓰는 작가입니�
 - **장소 사이의 거리·이동 시간·'가깝다'는 말은 쓰지 마세요.** 입력에 거리가 없습니다.
   주소·overview 에 없는 해안·산간 같은 지형 말과 '이동 없이' 같은 과장도 쓰지 마세요.
 
-문구:
-- 모든 문구(reason·intro·summary)는 '~합니다'체로 씁니다.
+"""
+
+_TONE_ALL = """문구:
+- 모든 문구(overview_summary·reason·intro·summary)는 '~합니다'체로 씁니다.
+"""
+
+_COMMON = """\
 - 관심사·여행 스타일 이름("하천·해양", "전시 시설")은 그대로 옮기지 말고 그 장소에 맞게 풀어 씁니다.
 - 동행(친구·연인·가족·단체·혼자)은 넣더라도 **하루에 한 장소의 이유까지**,
   하루 요약에도 한 번까지입니다.
-- reasons — places 의 **content_id 마다 하나씩.** reason 은 그 장소의 이름을 넣어
-  **70~150자**로 씁니다. 문장 수는 자유입니다.
+"""
+
+_REASONS = """- reasons — places 의 **content_id 마다 하나씩.**
+  항목마다 overview_summary 를 먼저, reason 을 마지막에 씁니다.
+  overview_summary 는 그 장소의 overview 를 **2문장**으로 요약합니다. 한 문장에 사실 하나씩,
+  전체 200자를 넘지 않게 씁니다. overview 에 있는 사실만 쓰고 여행자의 조건은 넣지 않습니다.
+  휴관·소실 같은 안내가 있으면 요약에 넣습니다. overview 가 비어 있으면 빈 문자열("")로 둡니다.
+  reason 은 그 장소의 이름을 넣어 **1문장**으로, 100자를 넘지 않게 씁니다.
   reason 은 장소 소개가 아니라 **이 여행자에게 왜 이곳인지**입니다.
   이 장소의 구체적인 점 하나(분류·overview 에 있는 것)를 골라, 그것이 이 여행자의 조건에
   왜 좋은지를 씁니다. 조건은 taste 가 관심사 이름이면 그 관심사, "비슷한 취향(…)"이면
@@ -98,12 +122,47 @@ SYSTEM_PROMPT = """당신은 여행 가이드북 문구를 쓰는 작가입니�
     - "~에 관심 있는 여행자라면", "~하는 여행이라면"처럼 조건을 문장 앞에 붙이는 시작
     - "~할 수 있습니다", "~곳입니다"로 끝나는 이유를 잇달아 쓰는 것
     - "○○에게 알맞습니다", "○○에게 추천합니다"처럼 대상을 정하는 끝맺음
-- title — **15자 이내.** 지역과 여행의 성격이 드러나게 (예: "경주 역사 여행").
+"""
+
+_TITLE_INTRO = """- title — **15자 이내.** 지역과 여행의 성격이 드러나게 (예: "경주 역사 여행").
   날짜·일수는 넣지 마세요 — 표지에 따로 적힙니다.
 - intro — 여행을 소개하는 한 문장.
-- days — days 의 **모든 day 번호마다 하나씩.** summary 는 100~300자로,
+"""
+
+_DAYS = """- days — days 의 **모든 day 번호마다 하나씩.** summary 는 100~300자로,
   그날 도는 순서(장소 이름과 오전·오후)와 각 곳의 특징,
   같은 동네로 묶인 곳이 있으면 그 묶음을 씁니다."""
+
+SYSTEM_PROMPT = _HEADER + _FACTS + _TONE_ALL + _COMMON + _REASONS + _TITLE_INTRO + _DAYS
+
+_DAY_HEADER = """당신은 여행 가이드북 문구를 쓰는 작가입니다.
+
+여행 조건(trip)과 그 여행의 **하루** 일정(days 에 하루만)을 받습니다. 날짜·순서·시각은 정해져 있으니
+바꾸지 말고, 문구만 씁니다. 다른 날의 문구는 따로 씁니다.
+
+"""
+
+_DAY_TONE = """문구:
+- 모든 문구(overview_summary·reason·summary)는 '~합니다'체로 씁니다.
+"""
+
+# 시각 숫자 금지: 하루치만 받으면 start_time 을 "09시"·"11시 30분"처럼 옮겨 적었다
+# (10-31 종로 · 청송, 한 번에 쓸 때는 없었다). 시각은 가이드북 장소 쪽에 따로 나온다
+_DAY_SUMMARY = """- summary — 이 하루의 요약. 100~300자로,
+  그날 도는 순서(장소 이름과 오전·오후)와 각 곳의 특징,
+  같은 동네로 묶인 곳이 있으면 그 묶음을 씁니다.
+  시각 숫자("09시", "11시 30분")는 쓰지 말고 오전·오후·저녁으로만 씁니다."""
+
+DAY_SYSTEM_PROMPT = _DAY_HEADER + _FACTS + _DAY_TONE + _COMMON + _REASONS + _DAY_SUMMARY
+
+_COVER_HEADER = """당신은 여행 가이드북 문구를 쓰는 작가입니다.
+
+여행 조건(trip)과 날짜별 장소의 이름·분류(days)를 받아 표지 문구만 씁니다.
+입력에 있는 것만 쓰고, intro 는 '~합니다'체로 씁니다.
+
+"""
+
+COVER_SYSTEM_PROMPT = _COVER_HEADER + _TITLE_INTRO.rstrip()
 
 
 def write_all(
@@ -290,7 +349,7 @@ def _validate_days(days: list[DayDraft], day_count: int) -> None:
         )
 
 
-def _validate_reasons(reasons: list[Reason], plan: list[PlanItem]) -> None:
+def _validate_reasons(reasons: list[SummaryAndReason], plan: list[PlanItem]) -> None:
     """
     추천 이유가 배치된 곳마다 **한 번씩** 있나.
 
@@ -305,16 +364,14 @@ def _validate_reasons(reasons: list[Reason], plan: list[PlanItem]) -> None:
 
 
 def _claude_write_all(model: str, payload: str, trip: TripRequest) -> WriterDraft:
-    """실제 Claude 를 1회 호출한다. [비용 발생]"""
-    request = {
-        "stage": "write",  # 한 작업에 호출이 둘이라 기록에서 가른다
-        "trip": trip.model_dump(),
-        "system": SYSTEM_PROMPT,
-        "plan": json.loads(payload),
-    }
-    return llm_client.call_and_record(
-        model, SYSTEM_PROMPT, payload, WriterDraft, WRITE_TIMEOUT, request
-    )
+    """
+    Claude 로 날짜별로 나눠 동시에 쓴다 — 표지 1 + 날짜 수만큼 호출. [비용 발생]
+    한 번에 쓰면 7일 · 35곳이 137초로 글쓰기 상한(120초)을 넘었다 (2026-10-31, 나눠 42초).
+    """
+    # 여기서 불러온다 — write_by_day 가 이 모듈의 지시문을 쓰므로 맨 위에서 부르면 서로를 부른다
+    from src.llm import write_by_day
+
+    return write_by_day.write_by_day(json.loads(payload), trip, model)
 
 
 def _vllm_write_all(payload: str, trip: TripRequest) -> WriterDraft:
@@ -335,6 +392,23 @@ def _vllm_write_all(payload: str, trip: TripRequest) -> WriterDraft:
         "system": system,
         "plan": json.loads(payload),
     }
-    return vllm_client.call_and_record(
-        system, payload, WriterDraft, VLLM_WRITE_TIMEOUT, request
+    v7_draft = vllm_client.call_and_record(
+        system, payload, V7WriterDraft, VLLM_WRITE_TIMEOUT, request
+    )
+    return _with_empty_summaries(v7_draft)
+
+
+def _with_empty_summaries(v7_draft: V7WriterDraft) -> WriterDraft:
+    """vLLM 은 v7 모양으로 학습했다 — 요약 칸 없이 받고 빈 값으로 맞춘다."""
+    reasons = [
+        SummaryAndReason(
+            content_id=reason.content_id, overview_summary="", reason=reason.reason
+        )
+        for reason in v7_draft.reasons
+    ]
+    return WriterDraft(
+        title=v7_draft.title,
+        intro=v7_draft.intro,
+        days=v7_draft.days,
+        reasons=reasons,
     )
