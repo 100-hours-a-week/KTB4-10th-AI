@@ -39,6 +39,12 @@ PROMPT = (
 """
 )
 
+# 원래 요구사항도 넘긴다 — 안 넘기면 "박물관은 빼 주세요"로 만든 일정을 고칠 때 다시 들어온다
+USER_REQUEST_PROMPT = (
+    llm_arrange.USER_REQUEST_PROMPT
+    + "- user_request 와 feedback 이 부딪히면 feedback 을 따릅니다.\n"
+)
+
 
 def rearrange_all(
     candidates: list[Candidate],
@@ -70,6 +76,7 @@ def rearrange_all(
                 day_count,
                 per_day,
                 conditions,
+                trip.user_request,
             )
             draft = _claude_rearrange_all(llm_client.model_name(), payload, trip)
     except LLMError as exc:
@@ -100,10 +107,11 @@ def _payload(
     day_count: int,
     per_day: int,
     conditions: dict,
+    user_request: str | None = None,
 ) -> str:
     """생성 배치의 입력에서 개수 강제를 빼고, 이전 배치와 피드백을 더한다."""
     fields = llm_arrange.payload_fields(
-        candidates, start, day_count, per_day, conditions
+        candidates, start, day_count, per_day, conditions, user_request
     )
     # 재생성은 장소가 줄 수 있다 — 정확한 개수를 주면 「여유롭게」와 부딪힌다
     del fields["total_to_place"]
@@ -124,13 +132,16 @@ def _claude_rearrange_all(
     model: str, payload: str, trip: TripRequest
 ) -> RegenerateDraft:
     """실제 Claude 를 1회 호출한다. [비용 발생]"""
+    system = PROMPT
+    if trip.user_request:
+        system = PROMPT + USER_REQUEST_PROMPT
     request = {
         "stage": "arrange",
         "regenerate": True,  # 기록에서 생성 배치와 가르려고
         "trip": trip.model_dump(),
-        "system": PROMPT,
+        "system": system,
         "candidates": json.loads(payload),
     }
     return llm_client.call_and_record(
-        model, PROMPT, payload, RegenerateDraft, llm_arrange.ARRANGE_TIMEOUT, request
+        model, system, payload, RegenerateDraft, llm_arrange.ARRANGE_TIMEOUT, request
     )

@@ -22,6 +22,7 @@ MAX_DAYS = 7  # 계약 2장
 MAX_CONTENTS = 1000
 MAX_TITLE = 15  # 계약 7장. 재생성 요청의 title 도 같은 상한
 MAX_FEEDBACK = 200  # 재생성 피드백 (설계 명세서 AI-rest-api.xlsx)
+MAX_USER_REQUEST = 200  # 생성 요구사항. 재생성 피드백과 같은 상한
 MIN_PEOPLE = 1
 MAX_PEOPLE = 10
 
@@ -57,6 +58,7 @@ def to_trip_request(payload: dict) -> TripRequest:
         raise InputError("invalid_request", "region.city 가 없습니다")
 
     detail_codes, travel_styles = _to_preference_codes(payload.get("preferences"))
+    user_request = _to_user_request(payload)
 
     try:
         trip = TripRequest(
@@ -70,6 +72,7 @@ def to_trip_request(payload: dict) -> TripRequest:
             people_count=payload.get("people_count"),
             detail_codes=detail_codes,
             travel_styles=travel_styles,
+            user_request=user_request,
         )
     except ValidationError as exc:
         raise InputError("invalid_request", str(exc)) from exc
@@ -87,6 +90,21 @@ def to_trip_request(payload: dict) -> TripRequest:
         raise InputError("invalid_request", str(exc)) from exc
 
     return trip
+
+
+def _to_user_request(payload: dict) -> str | None:
+    """선택 칸이다. 없거나 공백뿐이면 요구사항이 없는 요청으로 본다."""
+    value = payload.get("user_request")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InputError("invalid_request", "user_request 는 문자열입니다")
+    text = value.strip()
+    if len(text) > MAX_USER_REQUEST:
+        raise InputError(
+            "invalid_request", f"user_request 가 {MAX_USER_REQUEST}자를 넘습니다"
+        )
+    return text or None
 
 
 def _check_dates(trip: TripRequest) -> None:
