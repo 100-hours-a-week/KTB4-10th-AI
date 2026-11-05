@@ -28,6 +28,7 @@ class TripRequest(BaseModel):
     people_count: int = 1
     detail_codes: list[str] = []  # user_category_enum.csv 의 DETAIL 코드
     travel_styles: list[str] = []  # TRAVEL_STYLE 코드
+    user_request: Optional[str] = None  # 사용자가 글로 쓴 요구사항. 배치만 본다
 
 
 class Candidate(BaseModel):

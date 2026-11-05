@@ -317,7 +317,11 @@ async def _generate(job: dict) -> Itinerary:
 
     is_regeneration = "source_job_id" in job
     name = "regenerate" if is_regeneration else "generate"
-    metadata = {"job_id": job["job_id"], "source_job_id": job.get("source_job_id")}
+    metadata = {
+        "job_id": job["job_id"],
+        "source_job_id": job.get("source_job_id"),
+        "user_request": job["trip"].user_request,
+    }
     # 작업 하나를 랭퓨즈 기록 하나로 묶는다. to_thread 는 지금 문맥을 복사해 넘기므로
     # 스레드 안의 노드·모델 호출 기록이 이 아래로 들어온다
     with get_client().start_as_current_observation(name=name, metadata=metadata):

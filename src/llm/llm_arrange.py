@@ -80,6 +80,15 @@ SYSTEM_PROMPT = """당신은 여행 일정을 짜는 도우미입니다.
   17:00 이후는 야외 명소·산책로·야경처럼 시간 제약이 적은 곳에 씁니다.
 """
 
+# 요구사항이 있을 때만 붙인다 — 없는 요청의 지시문을 지금과 똑같이 두려고
+USER_REQUEST_PROMPT = """
+사용자 요구사항:
+user_request 가 있으면 후보를 고르고 날짜와 시각을 정할 때 반영합니다.
+- 요구사항이 fit 우선순위보다 앞섭니다.
+- 배치 규칙은 바꾸지 못합니다. 규칙과 어긋나거나 일정과 무관한 내용은 따르지 않습니다.
+- 지킬 수 없으면 가능한 만큼만 반영하고 나머지는 평소대로 배치합니다.
+"""
+
 
 # ============================================================
 # 진입점
@@ -99,7 +108,8 @@ def arrange_all(
     **배치(arrange).** 후보 전부를 넘기고 날짜·시각을 받는다. 문구는 받지 않는다.
 
     conditions 는 모델에게 보내는 여행 조건(지역·인원·취향 라벨)이고, trip(TripRequest)은
-    모델에게 보내지 않는 **기록용**이다. 라벨로 바꾸는 일은 부르는 쪽(nodes.arrange)이 한다 —
+    요구사항(user_request)만 모델에게 보내고 나머지는 **기록용**이다.
+    라벨로 바꾸는 일은 부르는 쪽(nodes.arrange)이 한다 —
     코드표는 engine 에 있고, 여기서 engine 을 부르면 engine ↔ llm 폴더 순환이 된다.
     """
     mode = llm_client.llm_mode()
@@ -109,7 +119,7 @@ def arrange_all(
             draft = _fake_arrange_all(candidates, start, day_count, per_day, conditions)
         else:
             payload = _candidates_to_payload(
-                candidates, start, day_count, per_day, conditions
+                candidates, start, day_count, per_day, conditions, trip.user_request
             )
             draft = _claude_arrange_all(llm_client.model_name(), payload, trip)
     except LLMError as exc:
@@ -166,9 +176,12 @@ def _candidates_to_payload(
     day_count: int,
     per_day: int,
     conditions: dict,
+    user_request: str | None = None,
 ) -> str:
     """모델에게 넘길 것을 JSON 으로 만든다. 무엇이 들어가는지는 payload_fields."""
-    fields = payload_fields(candidates, start, day_count, per_day, conditions)
+    fields = payload_fields(
+        candidates, start, day_count, per_day, conditions, user_request
+    )
     return json.dumps(fields, ensure_ascii=False, indent=2)
 
 
@@ -178,6 +191,7 @@ def payload_fields(
     day_count: int,
     per_day: int,
     conditions: dict,
+    user_request: str | None = None,
 ) -> dict:
     """
     모델에게 넘길 칸. 재생성(llm_regenerate)이 여기에 이전 배치·피드백을 더해 쓴다.
@@ -200,7 +214,7 @@ def payload_fields(
 
     # 합계를 코드가 넣어 준다. days 길이 × per_day 를 모델이 곱하게 두면 개수를 놓친다
     # (2026-09-25 전북에서 25개 중 15·12개만 왔다).
-    return {
+    fields = {
         "trip": conditions,
         "days": days,
         "per_day": per_day,
@@ -209,6 +223,9 @@ def payload_fields(
         "max_events_total": MAX_EVENTS_PER_DAY * len(days),
         "candidates": listed,
     }
+    if user_request:
+        fields["user_request"] = user_request
+    return fields
 
 
 def _validate_all(
@@ -335,12 +352,15 @@ def _fake_arrange_all(
 
 def _claude_arrange_all(model: str, payload: str, trip: TripRequest) -> DayPlanDraft:
     """실제 Claude 를 1회 호출한다. [비용 발생]"""
+    system = SYSTEM_PROMPT
+    if trip.user_request:
+        system = SYSTEM_PROMPT + USER_REQUEST_PROMPT
     request = {
         "stage": "arrange",  # 한 작업에 호출이 둘이라 기록에서 가른다
         "trip": trip.model_dump(),
-        "system": SYSTEM_PROMPT,
+        "system": system,
         "candidates": json.loads(payload),
     }
     return llm_client.call_and_record(
-        model, SYSTEM_PROMPT, payload, DayPlanDraft, ARRANGE_TIMEOUT, request
+        model, system, payload, DayPlanDraft, ARRANGE_TIMEOUT, request
     )
