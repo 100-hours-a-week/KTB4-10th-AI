@@ -207,10 +207,15 @@ def _log_attempt(event: dict, attempt: int, outcome: str, status: int | None) ->
         level = "INFO"
     else:
         level = "WARNING"
+    progress = event["data"]["progress"]
+    # 최종 알림은 진행 단계가 없다. 어느 알림이 거절됐는지 로그만 보고 가리려고 남긴다
+    step = progress["step"] if progress else None
     logs.write(
         level,
         "callback_sent",
         **_ids(event),
+        message=event["message"],
+        step=step,
         attempt=attempt,
         outcome=outcome,
         http_status=status,
