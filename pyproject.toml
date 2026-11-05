@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.141.1",
     # 백엔드 콜백 전송 (callback_message). 비동기로 보내 이벤트 루프를 막지 않는다
     "httpx>=0.28.1",
+    "langfuse>=5.1.0",
     "langgraph>=1.2.11",
     "openai>=3.31.0",
     "prometheus-client>=0.26.0",

@@ -26,9 +26,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from langfuse import get_client
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from src import logs, metrics
+from src import logs, metrics, tracing
 from src.llm import calllog, fake_llm, llm_client, vllm_client
 from src.server import adapter, callback, jobs
 
@@ -56,6 +57,8 @@ async def lifespan(app: FastAPI):
             vllm_client.check_settings()
     metrics.LLM_MODE.labels(llm_mode=mode).set(1)
 
+    tracing_on = tracing.init()
+
     # 기록이 켜졌는지는 여기서 본다 (서버는 OFF 여야 한다)
     save_label = "ON" if save else "OFF"
     logs.write(
@@ -64,6 +67,7 @@ async def lifespan(app: FastAPI):
         llm_mode=mode,
         save_mode=save_label,
         write_backend=write_backend,
+        tracing="ON" if tracing_on else "OFF",
     )
 
     callback.start()
@@ -75,6 +79,8 @@ async def lifespan(app: FastAPI):
     await jobs.stop(workers)
     # 작업이 다 끝난 뒤라야 마지막 완료 알림까지 보내는 중이다
     await callback.stop()
+    # 랭퓨즈 기록은 모아 뒀다가 보낸다 — 끄기 전에 남은 것을 마저 보낸다
+    get_client().shutdown()
 
 
 app = FastAPI(title="가이드북 생성 서버", lifespan=lifespan)

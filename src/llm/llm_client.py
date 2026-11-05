@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 import time
 
+from langfuse import get_client
+
 from src.llm import calllog
 from src.paths import REPO_ROOT
 
@@ -101,30 +103,48 @@ def call_and_record(
         max_retries=max_retries,
     )
 
-    started = time.monotonic()
-    try:
-        response = claude_call(client, model, system, payload, output_format)
-    except LLMError as exc:
+    # 메시지 목록으로 넘긴다 — dict 로 넘기면 mask 의 칸 이름 규칙(payload 등)에 걸려 줄어든다
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": payload},
+    ]
+    with get_client().start_as_current_observation(
+        name="claude", as_type="generation", model=model, input=messages
+    ) as generation:
+        started = time.monotonic()
+        try:
+            response = claude_call(client, model, system, payload, output_format)
+        except LLMError as exc:
+            calllog.record(
+                model,
+                request,
+                mode="llm",
+                error=str(exc),
+                elapsed=time.monotonic() - started,
+            )
+            generation.update(level="ERROR", status_message=str(exc))
+            raise
+
+        usage = response.usage
+        cost = calllog.claude_cost(model, usage.input_tokens, usage.output_tokens)
+        # 랭퓨즈에도 문자열로 넘긴다 — 객체는 SDK 가 dict 로 바꾼 뒤 mask 에 넘겨, 응답의
+        # reasons 같은 칸이 노드 기록 규칙에 걸려 "N개" 로 줄어든다
+        response_text = response.parsed_output.model_dump_json()
         calllog.record(
             model,
             request,
             mode="llm",
-            error=str(exc),
+            response_text=response_text,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cost=cost,
             elapsed=time.monotonic() - started,
         )
-        raise
-
-    usage = response.usage
-    calllog.record(
-        model,
-        request,
-        mode="llm",
-        response_text=response.parsed_output.model_dump_json(),
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        cost=calllog.claude_cost(model, usage.input_tokens, usage.output_tokens),
-        elapsed=time.monotonic() - started,
-    )
+        generation.update(
+            output=response_text,
+            usage_details={"input": usage.input_tokens, "output": usage.output_tokens},
+            cost_details={"total": cost},
+        )
 
     return response.parsed_output
 

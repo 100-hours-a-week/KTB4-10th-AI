@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from langfuse.langchain import CallbackHandler
 from langgraph.graph import END, START, StateGraph
 
 from src.engine import nodes
@@ -113,7 +114,9 @@ def _run_graph(
     노드에서 난 예외는 invoke 때처럼 그대로 올라간다.
     """
     result = None
-    for update in build_graph().stream(state, stream_mode="updates"):
+    # 노드마다 시작·끝을 랭퓨즈에 기록한다. 키가 없으면 아무것도 보내지 않는다
+    config = {"callbacks": [CallbackHandler()]}
+    for update in build_graph().stream(state, stream_mode="updates", config=config):
         # 함께 도는 노드(find_places · find_events)는 한 번에 같이 올 수 있다
         for node_name, output in update.items():
             step = STEP_AFTER_NODE.get(node_name)
