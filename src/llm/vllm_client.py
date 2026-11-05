@@ -25,6 +25,8 @@ import os
 import time
 import urllib.request
 
+from langfuse import get_client
+
 from src import logs
 from src.llm import calllog, llm_client
 from src.llm.llm_client import LLMError
@@ -183,30 +185,48 @@ def call_and_record(
         max_retries=VLLM_MAX_RETRIES,
     )
 
-    started = time.monotonic()
-    try:
-        response = vllm_call(client, model, system, payload, output_format)
-    except LLMError as exc:
+    # llm_client.call_and_record 와 같은 이유로 메시지 목록으로 넘긴다
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": payload},
+    ]
+    with get_client().start_as_current_observation(
+        name="vllm", as_type="generation", model=model, input=messages
+    ) as generation:
+        started = time.monotonic()
+        try:
+            response = vllm_call(client, model, system, payload, output_format)
+        except LLMError as exc:
+            calllog.record(
+                model,
+                request,
+                mode="llm",
+                error=str(exc),
+                elapsed=time.monotonic() - started,
+            )
+            generation.update(level="ERROR", status_message=str(exc))
+            raise
+
+        parsed = response.choices[0].message.parsed
+        usage = response.usage
+        input_tokens = usage.prompt_tokens if usage else None
+        output_tokens = usage.completion_tokens if usage else None
+        # llm_client.call_and_record 와 같은 이유로 랭퓨즈에도 문자열로 넘긴다
+        response_text = parsed.model_dump_json()
         calllog.record(
             model,
             request,
             mode="llm",
-            error=str(exc),
+            response_text=response_text,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             elapsed=time.monotonic() - started,
         )
-        raise
-
-    parsed = response.choices[0].message.parsed
-    usage = response.usage
-    calllog.record(
-        model,
-        request,
-        mode="llm",
-        response_text=parsed.model_dump_json(),
-        input_tokens=usage.prompt_tokens if usage else None,
-        output_tokens=usage.completion_tokens if usage else None,
-        elapsed=time.monotonic() - started,
-    )
+        # 비용은 넣지 않는다 — 런팟은 켜 둔 시간으로 과금된다
+        generation.update(
+            output=response_text,
+            usage_details={"input": input_tokens, "output": output_tokens},
+        )
     return parsed
 
 
