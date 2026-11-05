@@ -68,6 +68,7 @@ async def lifespan(app: FastAPI):
         save_mode=save_label,
         write_backend=write_backend,
         tracing="ON" if tracing_on else "OFF",
+        job_workers=jobs.job_workers(),
     )
 
     callback.start()
