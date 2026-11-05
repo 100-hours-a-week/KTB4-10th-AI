@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 import traceback
 import uuid
@@ -31,7 +32,8 @@ from src.llm.llm_client import LLMError
 from src.models import Candidate, Itinerary, TripRequest
 from src.server import adapter, callback
 
-MAX_CONCURRENCY = 3  # 동시에 LLM 을 부르는 작업 수. 분당 한도를 아직 모른다
+JOB_WORKERS_VAR = "JOB_WORKERS"
+DEFAULT_JOB_WORKERS = 3  # 작업 큐를 처리하는 워커 수
 MAX_QUEUE = 100
 # 작업 하나에 최대 10분. 배치·판정·글쓰기 호출의 최악을 더한 것보다 길어야 한다
 # (계산은 llm_arrange.ARRANGE_TIMEOUT 주석, 확인은 test_observability)
@@ -54,6 +56,20 @@ class RequestIdConflict(Exception):
     """같은 request_id 로 다른 내용이 왔다 (계약 3장, 409)."""
 
 
+def job_workers() -> int:
+    """
+    JOB_WORKERS 를 읽는다. 비우면 기본값.
+
+    잘못된 값이면 멈춘다. 오타를 기본값으로 읽으면 늘린 줄 알고 3개로 돌게 된다.
+    """
+    raw = os.environ.get(JOB_WORKERS_VAR, "").strip()
+    if not raw:
+        return DEFAULT_JOB_WORKERS
+    if not raw.isdigit() or int(raw) < 1:
+        raise ValueError(f"{JOB_WORKERS_VAR} 는 1 이상의 정수여야 합니다: {raw!r}")
+    return int(raw)
+
+
 def start() -> list[asyncio.Task]:
     """큐를 만들고 워커를 띄운다. 서버가 올라올 때 한 번."""
     global job_queue
@@ -64,7 +80,8 @@ def start() -> list[asyncio.Task]:
     metrics.JOBS_QUEUED.set_function(job_queue.qsize)
     metrics.JOBS_RUNNING.set_function(running_count)
 
-    return [asyncio.create_task(worker()) for _ in range(MAX_CONCURRENCY)]
+    worker_count = job_workers()
+    return [asyncio.create_task(worker()) for _ in range(worker_count)]
 
 
 def running_count() -> int:
