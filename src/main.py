@@ -31,7 +31,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src import logs, metrics, tracing
 from src.llm import calllog, fake_llm, llm_client, vllm_client
-from src.server import adapter, callback, jobs
+from src.server import adapter, callback, consumer, jobs
 
 
 @asynccontextmanager
@@ -73,9 +73,13 @@ async def lifespan(app: FastAPI):
 
     callback.start()
     workers = jobs.start()
+    # RABBITMQ_URL 이 있을 때만 큐에서 꺼낸다. HTTP 접수는 전환이 끝날 때까지 같이 둔다
+    await consumer.start()
 
     # 여기서 서버가 요청을 받는 동안 멈춰 있다. (yield 앞이 서버 켤 때, 뒤가 끌 때)
     yield
+    # 끌 때 : 큐에서 더 꺼내지 않고, MQ 로 받은 작업이 끝나길 기다린다
+    await consumer.stop()
     # 끌 때 : 큐가 빌 때까지 기다린 뒤 워커 취소하기 (이미 시작된 호출을 버리지 않으려고)
     await jobs.stop(workers)
     # 작업이 다 끝난 뒤라야 마지막 완료 알림까지 보내는 중이다
