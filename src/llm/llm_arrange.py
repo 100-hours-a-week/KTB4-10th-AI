@@ -139,7 +139,12 @@ def arrange_all(
     count_is_fixed = not trip.user_request
     try:
         _validate_all(
-            draft.items, candidates, start, day_count, per_day, exact_count=count_is_fixed
+            draft.items,
+            candidates,
+            start,
+            day_count,
+            per_day,
+            exact_count=count_is_fixed,
         )
     except LLMError as exc:
         raise LLMError(str(exc), kind="validation", stage="arrange") from exc
