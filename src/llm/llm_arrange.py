@@ -86,6 +86,11 @@ USER_REQUEST_PROMPT = """
 user_request 가 있으면 후보를 고르고 날짜와 시각을 정할 때 반영합니다.
 - 요구사항이 fit 우선순위보다 앞섭니다.
 - 배치 규칙은 바꾸지 못합니다. 규칙과 어긋나거나 일정과 무관한 내용은 따르지 않습니다.
+- 예외로, 요구사항이 하루 장소 수를 줄여 달라고 하면 배치 규칙 1의 개수 대신 그 수대로 둡니다.
+  모든 날에 한 곳 이상, 하루 최대 per_day 개입니다. 늘려 달라는 요청은 따르지 않고,
+  개수를 말하지 않으면 배치 규칙 1의 개수를 지킵니다.
+- 도착 시각이 있으면 첫날 첫 장소는 도착 1시간 뒤부터, 출발 시각이 있으면 마지막 날
+  마지막 장소가 출발 1시간 전에 끝나게 둡니다.
 - 지킬 수 없으면 가능한 만큼만 반영하고 나머지는 평소대로 배치합니다.
 """
 
@@ -130,8 +135,17 @@ def arrange_all(
         elapsed = time.monotonic() - started
         metrics.LLM_CALL_DURATION.labels(llm_mode=mode).observe(elapsed)
 
+    # 요구사항으로 하루 장소를 줄일 수 있다 — 늘리기는 하루 최대(per_day) 검사가 그대로 막는다
+    count_is_fixed = not trip.user_request
     try:
-        _validate_all(draft.items, candidates, start, day_count, per_day)
+        _validate_all(
+            draft.items,
+            candidates,
+            start,
+            day_count,
+            per_day,
+            exact_count=count_is_fixed,
+        )
     except LLMError as exc:
         raise LLMError(str(exc), kind="validation", stage="arrange") from exc
     return draft
@@ -240,7 +254,8 @@ def _validate_all(
     모델이 돌려준 것이 규칙을 지켰는지 본다. 하나라도 어긋나면 멈춘다.
 
     exact_count 를 끄면 「정확히 N개」만 건너뛴다 — 재생성은 "여유롭게"·"빼 줘"로
-    장소가 줄 수 있다 (#44). 하루 최대·하루 1곳 이상은 그대로 본다.
+    장소가 줄 수 있다 (#44). 생성 요구사항(#80)도 하루 장소 수를 줄일 수 있다.
+    하루 최대·하루 1곳 이상은 그대로 본다.
 
     아홉 가지를 보는데 성격이 둘로 갈린다 — **행사 기간 검사만이 사실 검사**이고
     (어기면 사용자에게 거짓 정보가 나간다), 나머지 여덟은 우리가 정한 형식·규칙이다.
