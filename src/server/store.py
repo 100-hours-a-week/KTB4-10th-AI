@@ -5,7 +5,7 @@ MQ 로 받은 작업의 상태를 MySQL(RDS) 테이블 하나에 남긴다 (docs
 입력·결과는 저장하지 않는다 — BE 가 갖고 있다. 남기는 것은 셋이다.
 
 - **중복 판별.** 같은 messageId 는 한 줄만 들어간다 (UNIQUE). 서버를 다시 켠 뒤 재배달돼도 거른다
-- **상태와 기한.** PROCESSING 인데 lease_until 이 지난 줄은 처리하다 죽은 작업이다 (복구는 6단계)
+- **상태와 기한.** PROCESSING 인데 lease_until 이 지난 줄은 처리하다 죽은 작업이다 (claim_expired)
 - **남긴 후보(A안).** 처음 생성 때 filter_closed 가 남긴 후보와 notice. 재생성이 이걸로
   후보를 좁힌다 — 메시지의 contents 는 거르기 전 목록이라, 그대로 쓰면 처음에 뺀 곳이 다시 들어온다
 
@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uk_message_id (message_id),
-    KEY idx_job_status (job_id, status)
+    KEY idx_job_status (job_id, status),
+    KEY idx_status_lease (status, lease_until)
 )
 """
 
@@ -106,11 +107,14 @@ async def finish(
     status: str,
     error_code: str | None,
     kept: list[dict] | None = None,
-) -> None:
-    """끝난 상태를 적는다. kept 는 남긴 후보 [{content_id, notice}] — 성공한 작업만 넘긴다."""
-    await _execute(
+) -> bool:
+    """
+    끝난 상태를 적는다. kept 는 남긴 후보 [{content_id, notice}] — 성공한 작업만 넘긴다.
+    PROCESSING 인 줄만 바꾼다. False 면 이미 복구(claim_expired)가 FAILED 로 처리한 작업이다.
+    """
+    changed = await _change(
         f"UPDATE {TABLE} SET status = %s, error_code = %s, kept_candidates = %s "
-        "WHERE message_id = %s",
+        "WHERE message_id = %s AND status = 'PROCESSING'",
         (
             status,
             error_code,
@@ -118,6 +122,29 @@ async def finish(
             message_id,
         ),
     )
+    return changed == 1
+
+
+async def claim_expired(error_code: str) -> list[tuple[str, int, int]]:
+    """
+    처리하다 죽은 작업을 FAILED 로 바꾸고 (message_id, job_id, attempt) 를 돌려준다.
+    기한(lease_until)이 지난 PROCESSING 줄만 — 기한 안이면 아직 도는 중일 수 있다 (다른 Pod 포함).
+    한 줄씩 status 를 조건으로 바꿔, 여러 Pod 가 동시에 돌아도 한 곳만 가져간다.
+    """
+    rows = await _execute(
+        f"SELECT message_id, job_id, attempt FROM {TABLE} "
+        "WHERE status = 'PROCESSING' AND lease_until < NOW()"
+    )
+    claimed = []
+    for message_id, job_id, attempt in rows:
+        changed = await _change(
+            f"UPDATE {TABLE} SET status = 'FAILED', error_code = %s "
+            "WHERE message_id = %s AND status = 'PROCESSING'",
+            (error_code, message_id),
+        )
+        if changed == 1:
+            claimed.append((message_id, job_id, attempt))
+    return claimed
 
 
 async def remove(message_id: str) -> None:
@@ -146,3 +173,10 @@ async def _execute(sql: str, args: tuple = ()) -> list[tuple]:
         async with conn.cursor() as cursor:
             await cursor.execute(sql, args)
             return list(await cursor.fetchall())
+
+
+async def _change(sql: str, args: tuple = ()) -> int:
+    """바꾼 줄 수를 돌려준다."""
+    async with _pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            return await cursor.execute(sql, args)

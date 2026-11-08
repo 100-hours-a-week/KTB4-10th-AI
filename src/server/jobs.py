@@ -192,6 +192,8 @@ def accept_message(
     places: list[Candidate],
     events: list[Candidate],
     message_id: str,
+    backend_job_id: int,
+    attempt: int,
     request: dict,
     regeneration: dict | None = None,
 ) -> dict:
@@ -200,6 +202,7 @@ def accept_message(
     consumer 가 처리 칸을 잡은 뒤 run() 으로 바로 돌린다 (src/server/consumer.py).
 
     job_id 는 messageId 다. 같은 BE 작업이라도 사용자 재시도(attempt)마다 다른 작업이다.
+    콜백은 backend_job_id(BE jobId)·attempt 로 나간다 (callback._event).
     regeneration 은 재생성일 때만: source_job_id · previous_plan · feedback · title.
     """
     _purge_expired()
@@ -214,6 +217,8 @@ def accept_message(
         "events": events,
         "fingerprint": None,
         "request_id": message_id,
+        "backend_job_id": backend_job_id,
+        "attempt": attempt,
         "request": request,
         "accepted_at": datetime.now(dates.KST),
         **(regeneration or {}),
@@ -382,7 +387,8 @@ async def _generate(job: dict) -> Itinerary:
     is_regeneration = "source_job_id" in job
     name = "regenerate" if is_regeneration else "generate"
     metadata = {
-        "job_id": job["job_id"],
+        # MQ 작업은 BE 번호로 찾는다 (#76). HTTP 작업은 AI 가 만든 번호
+        "job_id": job.get("backend_job_id", job["job_id"]),
         "source_job_id": job.get("source_job_id"),
         "user_request": job["trip"].user_request,
     }

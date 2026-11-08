@@ -44,8 +44,16 @@ DEAD_LETTER_EXCHANGE = "guidebook.generation.dlx"
 DEAD_LETTER_ROUTING_KEY = "guidebook.generation.failed"
 SCHEMA_VERSION = 1
 JOB_TYPES = ("INITIAL", "REGENERATION")
-# DB 의 lease_until = 받은 시각 + 이만큼. 작업 제한(10분)에 콜백·기록 여유 5분
-LEASE_SECONDS = jobs.JOB_TIMEOUT + 300
+# DB 의 lease_until = 받은 시각 + 이만큼. 작업 제한(10분)이 지나면 _process 가 바로 실패로 적으므로
+# 1분 여유면 된다. 이게 지나도 PROCESSING 이면 처리하다 죽은 작업 — BE 제한(15분)보다 먼저 알린다
+LEASE_SECONDS = jobs.JOB_TIMEOUT + 60
+# 일시 오류(NACK)로 retry 큐를 돈 횟수가 이만큼이면, 이번에도 실패할 때 DLQ 로 보낸다 (처음 + 3번)
+MAX_RETRIES = 3
+# 처리하다 죽은 작업을 찾는 간격(초). 켤 때 한 번, 그 뒤로 이 간격마다
+RECOVER_INTERVAL = 60
+# 죽은 작업을 알리는 오류 코드 — 계약에 있는 코드를 쓴다 (BE 가 따로 처리할 필요 없게)
+INTERRUPTED_CODE = "generation_failed"
+INTERRUPTED_MESSAGE = "서버가 다시 시작되어 일정 생성이 중단되었습니다."
 
 _connection: AbstractRobustConnection | None = None
 _dead_letter: AbstractExchange | None = None
@@ -55,6 +63,7 @@ _dead_letter: AbstractExchange | None = None
 _slots: asyncio.Semaphore | None = None
 # 돌고 있는 작업. stop() 이 끝날 때까지 기다린다
 _running: set[asyncio.Task] = set()
+_recover_task: asyncio.Task | None = None
 
 
 class InvalidMessage(Exception):
@@ -79,7 +88,7 @@ async def start() -> None:
     서버가 켜질 때. 연결이 안 되거나 큐가 없으면 여기서 멈춘다 — 주소를 넣었는데 못 받는 채로
     떠 있으면 모든 요청이 BE 제한 시간(15분)까지 묵는다. 켜진 뒤 끊기면 aio-pika 가 다시 붙는다.
     """
-    global _connection, _dead_letter, _slots
+    global _connection, _dead_letter, _slots, _recover_task
     url = rabbitmq_url()
     if url is None:
         logs.write("INFO", "mq_disabled")
@@ -95,6 +104,15 @@ async def start() -> None:
     _dead_letter = await channel.get_exchange(DEAD_LETTER_EXCHANGE, ensure=True)
     await queue.consume(_on_message)
     logs.write("INFO", "mq_consuming", queue=QUEUE, slots=jobs.job_workers())
+    _recover_task = asyncio.create_task(_recover_loop())
+
+
+def status() -> str:
+    """/health 에 보일 연결 상태. 표시만 한다 — 끊겨도 aio-pika 가 다시 붙는다."""
+    if _connection is None:
+        return "off"
+    # is_closed 는 다시 붙는 중에도 False 다. 지금 붙어 있는지는 connected 로 본다
+    return "connected" if _connection.connected.is_set() else "disconnected"
 
 
 async def stop() -> None:
@@ -104,6 +122,8 @@ async def stop() -> None:
     """
     if _connection is None:
         return
+    if _recover_task is not None:
+        _recover_task.cancel()
     await _connection.close()
     await asyncio.gather(*_running, return_exceptions=True)
     await store.stop()
@@ -143,7 +163,9 @@ def parse(body: bytes) -> Envelope:
 async def _on_message(message: AbstractIncomingMessage) -> None:
     """
     메시지 하나. 여기서 예외가 새면 ACK 도 NACK 도 안 된 채 남아, prefetch 1 인 이 소비자가
-    멈춘다. 그래서 예상 못 한 오류도 전부 잡아 NACK 한다 (retry 큐로 갔다가 돌아온다).
+    멈춘다. 그래서 예상 못 한 오류도 전부 잡아 NACK 한다 (retry 큐로 갔다가 30초 뒤 돌아온다).
+    retry 를 MAX_RETRIES 번 돌고도 실패하면 DLQ 로 보낸다 — 안 그러면 DB 가 죽어 있는 동안
+    끝없이 돈다.
     """
     try:
         await _handle(message)
@@ -156,9 +178,30 @@ async def _on_message(message: AbstractIncomingMessage) -> None:
             traceback="".join(traceback.format_exception(exc)),
         )
         try:
-            await message.nack(requeue=False)
+            retries = _retries(message)
+            if retries >= MAX_RETRIES:
+                await _to_dead_letter(message, f"재시도 {retries}번 뒤에도 실패: {exc}")
+            else:
+                await message.nack(requeue=False)
         except Exception:
             pass  # 연결이 끊겼다. ACK 안 한 메시지는 브로커가 다시 넣는다
+
+
+def _retries(message: AbstractIncomingMessage) -> int:
+    """
+    이 메시지가 우리 NACK 로 retry 큐에 간 횟수. 브로커가 x-death 헤더에 큐·이유별로 센다
+    ({queue: guidebook.generation, reason: rejected} 의 count).
+    """
+    for death in (message.headers or {}).get("x-death") or []:
+        queue = death.get("queue")
+        reason = death.get("reason")
+        if isinstance(queue, bytes):
+            queue = queue.decode()
+        if isinstance(reason, bytes):
+            reason = reason.decode()
+        if queue == QUEUE and reason == "rejected":
+            return int(death.get("count", 0))
+    return 0
 
 
 async def _handle(message: AbstractIncomingMessage) -> None:
@@ -236,7 +279,14 @@ async def _accept(envelope: Envelope) -> dict | None:
         )
 
     return jobs.accept_message(
-        trip, places, events, envelope.message_id, payload, regeneration
+        trip,
+        places,
+        events,
+        envelope.message_id,
+        envelope.job_id,
+        envelope.attempt,
+        payload,
+        regeneration,
     )
 
 
@@ -288,6 +338,8 @@ def _reject(envelope: Envelope, exc: adapter.InputError) -> None:
     job = {
         "job_id": envelope.message_id,
         "request_id": envelope.message_id,
+        "backend_job_id": envelope.job_id,
+        "attempt": envelope.attempt,
         "status": "failed",
         "result": None,
         "error": {"code": exc.code, "message": exc.reason},
@@ -306,7 +358,8 @@ async def _record(job: dict) -> None:
     """
     끝난 상태를 DB 에 적는다. 성공한 작업은 지금 후보(처음 생성은 filter_closed 가 남긴 것,
     재생성은 좁혀 받은 것)를 같이 남긴다 — 다음 재생성이 source_job_id 로 찾는다.
-    실패해도 콜백은 보낸다. 줄은 PROCESSING 으로 남는다.
+    실패해도 콜백은 보낸다. 줄은 PROCESSING 으로 남아, 기한이 지나면 _recover 가 FAILED 로 바꾼다
+    (BE 는 결과를 받은 뒤라 sequence 가 낮은 FAILED 를 버린다).
     """
     kept = None
     if job["status"] == "completed":
@@ -316,7 +369,12 @@ async def _record(job: dict) -> None:
         ]
     error_code = job["error"]["code"] if job["error"] else None
     try:
-        await store.finish(job["job_id"], job["status"].upper(), error_code, kept)
+        changed = await store.finish(
+            job["job_id"], job["status"].upper(), error_code, kept
+        )
+        if not changed:
+            # 기한을 넘겨 이미 FAILED 로 알렸다. 일어나면 LEASE_SECONDS 가 짧은 것
+            logs.write("ERROR", "mq_finished_after_recover", message_id=job["job_id"])
     except Exception as exc:
         logs.write("ERROR", "mq_store_failed", message_id=job["job_id"], error=str(exc))
 
@@ -326,7 +384,7 @@ async def _forget(message_id: str) -> None:
     try:
         await store.remove(message_id)
     except Exception as exc:
-        # 줄이 PROCESSING 으로 남는다. 기한이 지나면 6단계 복구가 FAILED 로 알린다
+        # 줄이 PROCESSING 으로 남는다. 기한이 지나면 _recover 가 FAILED 로 알린다
         logs.write("ERROR", "mq_store_failed", message_id=message_id, error=str(exc))
 
 
@@ -343,3 +401,41 @@ async def _to_dead_letter(message: AbstractIncomingMessage, reason: str) -> None
         routing_key=DEAD_LETTER_ROUTING_KEY,
     )
     await message.ack()
+
+
+async def _recover_loop() -> None:
+    while True:
+        try:
+            await _recover()
+        except Exception as exc:
+            logs.write("ERROR", "mq_recover_failed", error=str(exc))
+        await asyncio.sleep(RECOVER_INTERVAL)
+
+
+async def _recover() -> None:
+    """
+    처리하다 죽은 작업(기한 지난 PROCESSING)을 FAILED 로 바꾸고 BE 에 알린다.
+    다시 돌리지 않는다 — 죽기 전에 LLM 비용이 이미 나갔을 수 있다. 다시 할지는 사용자가 정한다
+    (재시도하면 attempt 가 올라간 새 메시지가 온다).
+    """
+    for message_id, job_id, attempt in await store.claim_expired(INTERRUPTED_CODE):
+        logs.write(
+            "WARNING",
+            "mq_recovered",
+            message_id=message_id,
+            job_id=job_id,
+            attempt=attempt,
+        )
+        job = {
+            "job_id": message_id,
+            "request_id": message_id,
+            "backend_job_id": job_id,
+            "attempt": attempt,
+            "status": "failed",
+            "result": None,
+            "error": {"code": INTERRUPTED_CODE, "message": INTERRUPTED_MESSAGE},
+            # 죽기 전에 진행 알림을 최대 단계 수만큼 보냈을 수 있다. 그보다 큰 번호로 보내야
+            # BE 가 순서 늦은 알림으로 보고 버리지 않는다
+            "callback_sequence": len(callback.PROGRESS_MESSAGES),
+        }
+        callback.notify_final(job)

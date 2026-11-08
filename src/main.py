@@ -168,6 +168,9 @@ async def health() -> dict:
         "jobs": len(jobs.jobs),
         "queue_size": jobs.job_queue.qsize(),
         "running": jobs.running_count(),
+        # off · connected · disconnected. 끊겨도 status 는 ok — 실패로 내면 ECS 가 컨테이너를
+        # 바꿔 돌던 생성까지 잃는다. 연결은 aio-pika 가 다시 붙는다
+        "mq": consumer.status(),
     }
 
 
