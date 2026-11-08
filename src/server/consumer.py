@@ -8,13 +8,15 @@ RabbitMQ 큐(guidebook.generation)에서 생성·재생성 요청을 꺼내 작�
 받는 대로 꺼내 메모리에 쌓으면 재시작할 때 잃는다 — 기다리는 요청은 RabbitMQ 에 남겨 둔다.
 prefetch 1 이라 칸을 기다리는 동안 브로커는 다음 메시지를 주지 않는다.
 
-**ACK 는 작업을 받아 둔 뒤, 일정 생성 전에 보낸다.** 생성(최대 10분) 동안 메시지를 잡고 있으면
+**ACK 는 작업을 DB 에 저장한 뒤, 일정 생성 전에 보낸다.** 생성(최대 10분) 동안 메시지를 잡고 있으면
 연결이 끊길 때 재배달돼 LLM 비용이 두 번 나간다. ACK 뒤의 실패는 FAILED 콜백으로 알린다.
 
 큐·교환기는 BE 가 선언한다 (quorum · retry · DLX 설정). 여기서 다른 설정으로 선언하면 브로커가
 채널을 닫으므로, 이름으로 찾기만 한다. 로컬에서는 scripts/mq_local.py setup 이 BE 대신 만든다.
 
-RABBITMQ_URL 이 비면 켜지 않는다 — HTTP 로만 받는 지금 환경 그대로다.
+작업 상태·중복·재생성 후보(A안)는 MySQL 에 남긴다 (src/server/store.py).
+RABBITMQ_URL 을 넣으면 MYSQL_URL 도 있어야 한다.
+RABBITMQ_URL 이 비면 둘 다 켜지 않는다 — HTTP 로만 받는 지금 환경 그대로다.
 """
 
 from __future__ import annotations
@@ -33,7 +35,8 @@ from aio_pika.abc import (
 )
 
 from src import logs
-from src.server import adapter, callback, jobs
+from src.models import Candidate
+from src.server import adapter, callback, jobs, store
 
 URL_VAR = "RABBITMQ_URL"
 QUEUE = "guidebook.generation"
@@ -41,6 +44,8 @@ DEAD_LETTER_EXCHANGE = "guidebook.generation.dlx"
 DEAD_LETTER_ROUTING_KEY = "guidebook.generation.failed"
 SCHEMA_VERSION = 1
 JOB_TYPES = ("INITIAL", "REGENERATION")
+# DB 의 lease_until = 받은 시각 + 이만큼. 작업 제한(10분)에 콜백·기록 여유 5분
+LEASE_SECONDS = jobs.JOB_TIMEOUT + 300
 
 _connection: AbstractRobustConnection | None = None
 _dead_letter: AbstractExchange | None = None
@@ -80,6 +85,7 @@ async def start() -> None:
         logs.write("INFO", "mq_disabled")
         return
 
+    await store.start()
     _slots = asyncio.Semaphore(jobs.job_workers())
     _connection = await aio_pika.connect_robust(url)
     # publisher_confirms: DLQ 로 옮길 때 브로커가 받았다고 답한 뒤에만 원본을 ACK 한다 (유실 방지)
@@ -100,6 +106,7 @@ async def stop() -> None:
         return
     await _connection.close()
     await asyncio.gather(*_running, return_exceptions=True)
+    await store.stop()
 
 
 def parse(body: bytes) -> Envelope:
@@ -161,25 +168,35 @@ async def _handle(message: AbstractIncomingMessage) -> None:
         await _to_dead_letter(message, str(exc))
         return
 
-    # 이미 받은 메시지 (ACK 가 유실돼 재배달됐다). 일정을 두 번 만들지 않는다.
-    # 지금은 메모리로만 거른다 — 재시작을 넘는 중복은 DB 를 붙이는 5단계에서 막는다
-    if envelope.message_id in jobs.jobs:
-        logs.write("INFO", "mq_duplicate", message_id=envelope.message_id)
-        await message.ack()
-        return
-
-    # 칸이 빌 때까지 여기서 기다린다. 이 메시지는 아직 ACK 전이라 브로커에 남아 있다
+    # 칸이 빌 때까지 여기서 기다린다. 이 메시지는 아직 ACK 전이라 브로커에 남아 있다.
+    # DB 에는 칸을 잡은 뒤에 넣는다 — 먼저 넣고 기다리다 죽으면,
+    # 재배달된 메시지를 중복으로 보고 버린다
     await _slots.acquire()
+    inserted = False
     try:
-        job = _accept(envelope)
+        inserted = await store.insert(
+            envelope.message_id,
+            envelope.job_id,
+            envelope.attempt,
+            envelope.job_type,
+            LEASE_SECONDS,
+        )
+        job = None
+        if inserted:
+            job = await _accept(envelope)
+        else:
+            # 이미 받은 메시지 (ACK 가 유실돼 재배달됐다). 일정을 두 번 만들지 않는다
+            logs.write("INFO", "mq_duplicate", message_id=envelope.message_id)
         await message.ack()
     except BaseException:
-        # ACK 가 안 됐으면 브로커가 다시 보낸다. 넣어 둔 작업을 남기면 그때 중복으로 보고 버린다
+        # ACK 가 안 됐으면 브로커가 다시 보낸다. 넣어 둔 줄을 남기면 그때 중복으로 보고 버린다
         jobs.jobs.pop(envelope.message_id, None)
+        if inserted:
+            await _forget(envelope.message_id)
         _slots.release()
         raise
 
-    if job is None:  # 요청 내용이 틀려 실패로 알렸다
+    if job is None:  # 중복이거나, 요청 내용이 틀려 실패로 알렸다
         _slots.release()
         return
 
@@ -188,7 +205,7 @@ async def _handle(message: AbstractIncomingMessage) -> None:
     task.add_done_callback(_running.discard)
 
 
-def _accept(envelope: Envelope) -> dict | None:
+async def _accept(envelope: Envelope) -> dict | None:
     """
     메시지를 작업으로 바꿔 저장소에 넣는다. 요청 내용이 틀렸으면(지역·취향·후보 등) None.
 
@@ -210,11 +227,54 @@ def _accept(envelope: Envelope) -> dict | None:
             }
     except adapter.InputError as exc:
         _reject(envelope, exc)
+        await store.finish(envelope.message_id, "FAILED", exc.code)
         return None
+
+    if regeneration is not None:
+        places, events = await _narrow_to_kept(
+            envelope, regeneration["source_job_id"], places, events
+        )
 
     return jobs.accept_message(
         trip, places, events, envelope.message_id, payload, regeneration
     )
+
+
+async def _narrow_to_kept(
+    envelope: Envelope,
+    source_job_id,
+    places: list[Candidate],
+    events: list[Candidate],
+) -> tuple[list[Candidate], list[Candidate]]:
+    """
+    재생성 후보를 원본 작업이 남긴 후보로 좁히고 notice 를 다시 붙인다 (A안).
+    재생성은 filter_closed 를 돌리지 않는다 (#74) — 메시지의 contents 는 거르기 전 목록이다.
+
+    원본 기록이 없으면(DB 를 붙이기 전에 만든 작업 등) 받은 후보를 그대로 쓴다. 실패로 내면
+    사용자가 재생성을 못 한다. 대신 처음에 뺀 곳이 다시 들어올 수 있어 WARNING 으로 남긴다.
+    """
+    kept = None
+    if isinstance(source_job_id, int) and not isinstance(source_job_id, bool):
+        kept = await store.kept_candidates(source_job_id)
+    if kept is None:
+        logs.write(
+            "WARNING",
+            "mq_kept_missing",
+            message_id=envelope.message_id,
+            source_job_id=source_job_id,
+        )
+        return places, events
+
+    # 원본 작업이 남긴 순서대로 — HTTP 재생성이 원래 작업의 후보 목록을 그대로 쓰는 것과 같게
+    def narrow(candidates: list[Candidate]) -> list[Candidate]:
+        by_id = {c.content_id: c for c in candidates}
+        return [
+            by_id[item["content_id"]].model_copy(update={"notice": item["notice"]})
+            for item in kept
+            if item["content_id"] in by_id
+        ]
+
+    return narrow(places), narrow(events)
 
 
 def _reject(envelope: Envelope, exc: adapter.InputError) -> None:
@@ -237,9 +297,37 @@ def _reject(envelope: Envelope, exc: adapter.InputError) -> None:
 
 async def _run(job: dict) -> None:
     try:
-        await jobs.run(job)
+        await jobs.run(job, _record)
     finally:
         _slots.release()
+
+
+async def _record(job: dict) -> None:
+    """
+    끝난 상태를 DB 에 적는다. 성공한 작업은 지금 후보(처음 생성은 filter_closed 가 남긴 것,
+    재생성은 좁혀 받은 것)를 같이 남긴다 — 다음 재생성이 source_job_id 로 찾는다.
+    실패해도 콜백은 보낸다. 줄은 PROCESSING 으로 남는다.
+    """
+    kept = None
+    if job["status"] == "completed":
+        kept = [
+            {"content_id": c.content_id, "notice": c.notice}
+            for c in job["places"] + job["events"]
+        ]
+    error_code = job["error"]["code"] if job["error"] else None
+    try:
+        await store.finish(job["job_id"], job["status"].upper(), error_code, kept)
+    except Exception as exc:
+        logs.write("ERROR", "mq_store_failed", message_id=job["job_id"], error=str(exc))
+
+
+async def _forget(message_id: str) -> None:
+    """ACK 전에 멈춘 메시지의 줄을 지운다. 재배달되면 처음부터 다시 받는다."""
+    try:
+        await store.remove(message_id)
+    except Exception as exc:
+        # 줄이 PROCESSING 으로 남는다. 기한이 지나면 6단계 복구가 FAILED 로 알린다
+        logs.write("ERROR", "mq_store_failed", message_id=message_id, error=str(exc))
 
 
 async def _to_dead_letter(message: AbstractIncomingMessage, reason: str) -> None:

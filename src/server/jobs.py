@@ -222,9 +222,13 @@ def accept_message(
     return job
 
 
-async def run(job: dict) -> None:
-    """accept_message 로 넣은 작업 하나를 돌린다. 예외는 _process 가 전부 작업에 적는다."""
-    await _process(job)
+async def run(job: dict, on_finished) -> None:
+    """
+    accept_message 로 넣은 작업 하나를 돌린다. 예외는 _process 가 전부 작업에 적는다.
+    on_finished 는 끝난 상태를 DB 에 적는다 — 콜백보다 먼저 (BE 가 결과를 받은 뒤에도
+    DB 가 PROCESSING 이면, 6단계 복구가 끝난 작업에 FAILED 를 또 보낸다).
+    """
+    await _process(job, on_finished)
 
 
 def _enqueue(job: dict) -> None:
@@ -285,7 +289,7 @@ async def worker() -> None:
         # stop()의 job_queue.join()이 영원히 기다리지 않는다.
 
 
-async def _process(job: dict) -> None:
+async def _process(job: dict, on_finished=None) -> None:
     job["status"] = "processing"
 
     metrics.start_job_timing()
@@ -319,6 +323,8 @@ async def _process(job: dict) -> None:
     finally:
         metrics.JOB_DURATION.observe(time.monotonic() - started)
 
+    if on_finished is not None:
+        await on_finished(job)
     callback.notify_final(job)
     _save_generation(job)
 
