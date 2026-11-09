@@ -185,17 +185,11 @@ def _place(day: ItineraryDay, place: PlannedPlace) -> str:
         # 따로 한 줄을 두면 긴 행사 이름(제목 2줄)과 겹쳐 쪽이 넘친다
         category += f" · 행사 {_month_day(place.event_end_date)}까지"
 
-    # vLLM 글쓰기 · overview 없는 곳은 요약이 비어 있다 — 빈 단락을 그리지 않는다
-    about = ""
-    if place.overview_summary:
-        about = f'<div class="about">{_text(place.overview_summary)}</div>'
-
     return (
         f'{photo}<div class="pad"><span class="badge">DAY {day.day} · {_text(when)}</span>'
         f"<h3>{_text(place.name)}</h3>"
         f'<div class="info">{category}</div>'
         f'<div class="info">{_text(place.address)}</div>'
-        f"{about}"
         f'<div class="why"><b>WHY HERE</b>{_text(place.recommend_reason)}</div></div>'
     )
 
@@ -339,16 +333,19 @@ body {
   overflow-y:hidden;
   scroll-snap-type:x mandatory;
   scrollbar-width:none;
-  padding:24px max(16px, calc(50vw - 260px)) 80px;
+  padding:24px max(16px, calc(50vw - var(--pw) * var(--z) / 2)) 80px;
 }
 .book::-webkit-scrollbar { display:none; }
-/* 모든 쪽이 같은 크기다 — 표지 비율(3:4.3)로, 화면 높이를 넘지 않게.
-   내용이 넘치면 그 쪽 안에서 스크롤 */
+/* 모든 쪽은 PDF 한 장과 같은 520 x 746px 로 짠다 (표지 비율 3:4.3).
+   화면이 작으면 쪽을 글자째 같은 비율로 줄인다 (--z, 아래 NAV 스크립트가 화면 크기로 정한다).
+   쪽 크기만 줄이면 글이 쪽 밖으로 넘쳐 휴대폰에서 쪽마다 스크롤이 생긴다 */
 .book {
-  --pw:min(520px, calc(100vw - 32px));
-  --ph:min(calc(100vh - 104px), calc(var(--pw) * 4.3 / 3));
+  --pw:520px;
+  --ph:746px;
+  --z:1;
 }
 .page {
+  zoom:var(--z);
   flex:none;
   width:var(--pw);
   height:var(--ph);
@@ -524,7 +521,6 @@ h2 { font-size:24px; margin:6px 0 18px; line-height:1.3; }
 }
 .place h3 { font-size:22px; margin:10px 0 4px; }
 .place .info { font-size:13px; color:var(--sub); }
-.about { margin-top:14px; font-size:14px; line-height:1.6; }
 .why { margin-top:16px; padding-left:14px; border-left:3px solid var(--accent); font-size:15px; }
 .why b {
   display:block;
@@ -563,7 +559,8 @@ h2 { font-size:24px; margin:6px 0 18px; line-height:1.3; }
   body { background:var(--paper); }
   .nav { display:none; }
   /* 화면은 옆으로 넘기는 한 줄이라 그대로 찍으면 첫 쪽만 나온다 → 위아래로 쌓는다 */
-  .book { --pw:520px; --ph:746px; display:block; height:auto; overflow:visible; padding:0; }
+  /* 화면용 축소(--z)는 스크립트가 .book 에 직접 넣으므로 !important 로 되돌린다 */
+  .book { --z:1 !important; display:block; height:auto; overflow:visible; padding:0; }
   /* 화면에선 넘치는 내용을 쪽 안에서 스크롤 → 종이에선 잘리지 않게 높이를 풀어 다음 장으로 */
   .page {
     min-height:var(--ph);
@@ -591,6 +588,15 @@ const pos = document.getElementById("pos");
 const prev = document.getElementById("prev");
 const next = document.getElementById("next");
 let cur = 0;
+
+// 쪽(520 x 746)이 화면에 통째로 들어가는 비율. 좌우 16px · 위 24px · 아래 버튼 자리 80px 를 뺀다.
+// 큰 화면에서는 키우지 않는다
+const fit = () => {
+  const z = Math.min(1, (innerWidth - 32) / 520, (innerHeight - 104) / 746);
+  book.style.setProperty("--z", z.toFixed(4));
+};
+fit();
+addEventListener("resize", fit);
 
 const go = (i) => {
   const target = pages[Math.max(0, Math.min(pages.length - 1, i))];
