@@ -10,6 +10,8 @@ dependencies = [
     # MQ 작업 상태를 MySQL(RDS)에 남긴다 (src/server/store.py)
     "aiomysql>=0.3.2",
     "anthropic>=1.7.0",
+    # aiomysql 이 MySQL 8.4 기본 로그인(caching_sha2_password)을 할 때 쓴다. 없으면 DB 재시작 뒤 접속 실패
+    "cryptography>=50.0.2",
     "fastapi>=0.141.1",
     # 백엔드 콜백 전송 (callback_message). 비동기로 보내 이벤트 루프를 막지 않는다
     "httpx>=0.28.1",
