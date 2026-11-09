@@ -238,7 +238,10 @@ def _ids(event: dict) -> dict:
         "request_id": data["request_id"],
         "sequence": data["sequence"],
     }
-    for key in ("job_id", "backend_job_id", "attempt"):
+    for key in ("job_id", "backend_job_id"):
         if key in data:
             ids[key] = data[key]
+    # 작업 회차. 로그의 attempt 는 전송 횟수(_log_attempt)라 이름을 달리한다
+    if "attempt" in data:
+        ids["job_attempt"] = data["attempt"]
     return ids
