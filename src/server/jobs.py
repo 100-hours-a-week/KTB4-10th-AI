@@ -20,6 +20,7 @@ import os
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from langfuse import get_client
@@ -34,6 +35,7 @@ from src.server import adapter, callback
 
 JOB_WORKERS_VAR = "JOB_WORKERS"
 DEFAULT_JOB_WORKERS = 3  # 작업 큐를 처리하는 워커 수
+THREAD_POOL_SPARE = 4  # 워커 몫 말고 스레드 풀에 더 두는 자리 (start() 설명)
 MAX_QUEUE = 100
 # 작업 하나에 최대 10분. 배치·판정·글쓰기 호출의 최악을 더한 것보다 길어야 한다
 # (계산은 llm_arrange.ARRANGE_TIMEOUT 주석, 확인은 test_observability)
@@ -81,6 +83,13 @@ def start() -> list[asyncio.Task]:
     metrics.JOBS_RUNNING.set_function(running_count)
 
     worker_count = job_workers()
+    # to_thread 는 기본 스레드 풀을 쓰는데, 그 크기는 파이썬이 CPU 수로 정한다(CPU + 4).
+    # 워커가 그보다 많으면 남는 워커는 스레드를 기다린다 — 그래서 풀을 워커 수에 맞춘다.
+    # 콜백의 주소 조회(DNS)도 같은 풀을 쓰므로, 생성이 스레드를 다 차지해도 막히지 않게 여유를 둔다
+    pool_size = worker_count + THREAD_POOL_SPARE
+    pool = ThreadPoolExecutor(max_workers=pool_size)
+    asyncio.get_running_loop().set_default_executor(pool)
+
     return [asyncio.create_task(worker()) for _ in range(worker_count)]
 
 
