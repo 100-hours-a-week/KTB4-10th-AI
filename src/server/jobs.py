@@ -211,7 +211,8 @@ def accept_message(
     consumer 가 처리 칸을 잡은 뒤 run() 으로 바로 돌린다 (src/server/consumer.py).
 
     job_id 는 messageId 다. 같은 BE 작업이라도 사용자 재시도(attempt)마다 다른 작업이다.
-    콜백은 backend_job_id(BE jobId)·attempt 로 나간다 (callback._event).
+    콜백의 job_id · request_id 도 messageId 다.
+    backend_job_id · attempt 는 남긴 후보(store) · Langfuse 기록에만 쓴다.
     regeneration 은 재생성일 때만: source_job_id · previous_plan · feedback · title.
     """
     _purge_expired()
