@@ -230,8 +230,7 @@ def accept_message(
 async def run(job: dict, on_finished) -> None:
     """
     accept_message 로 넣은 작업 하나를 돌린다. 예외는 _process 가 전부 작업에 적는다.
-    on_finished 는 끝난 상태를 DB 에 적는다 — 콜백보다 먼저 (BE 가 결과를 받은 뒤에도
-    DB 가 PROCESSING 이면, 6단계 복구가 끝난 작업에 FAILED 를 또 보낸다).
+    on_finished 는 끝난 작업을 기억한다 (성공하면 남긴 후보 — 재생성이 쓴다). 콜백보다 먼저.
     """
     await _process(job, on_finished)
 

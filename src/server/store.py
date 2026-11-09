@@ -1,182 +1,63 @@
 """
 src/server/store.py
 
-MQ 로 받은 작업의 상태를 MySQL(RDS) 테이블 하나에 남긴다 (docs/mq-transition.md 5장).
-입력·결과는 저장하지 않는다 — BE 가 갖고 있다. 남기는 것은 셋이다.
+MQ 로 받은 작업을 메모리에 기억한다 (docs/mq-transition.md 5장). DB 는 쓰지 않는다 —
+서버가 다시 켜지면 둘 다 비고, 그 뒤 같은 메시지가 다시 오면 한 번 더 만든다.
+그 중복 완료 콜백은 BE 가 attempt·종료 상태로 걸러 무시한다 (BE 와 합의, 11/9).
 
-- **중복 판별.** 같은 messageId 는 한 줄만 들어간다 (UNIQUE). 서버를 다시 켠 뒤 재배달돼도 거른다
-- **상태와 기한.** PROCESSING 인데 lease_until 이 지난 줄은 처리하다 죽은 작업이다 (claim_expired)
+- **중복 판별.** 받은 messageId. 같은 서버가 켜져 있는 동안 다시 오면 거른다
 - **남긴 후보(A안).** 처음 생성 때 filter_closed 가 남긴 후보와 notice. 재생성이 이걸로
-  후보를 좁힌다 — 메시지의 contents 는 거르기 전 목록이라, 그대로 쓰면 처음에 뺀 곳이 다시 들어온다
+  후보를 좁힌다 — 메시지의 contents 는 거르기 전 목록이라, 그대로 쓰면 처음에 뺀 곳이 다시 들어온다.
+  재시작 뒤에는 없으므로 재생성은 받은 contents 를 그대로 쓴다 (시안님 OK, 11/9)
 
-consumer 가 켜질 때만 쓴다. MYSQL_URL 예: mysql://ai:ai@localhost:3307/kgb_ai
+둘 다 KEEP_FOR 가 지나면 지운다 (메모리가 끝없이 늘지 않게).
 """
 
 from __future__ import annotations
 
-import json
-import os
-from urllib.parse import unquote, urlparse
+from datetime import datetime, timedelta
 
-import aiomysql
-import pymysql
+# 재생성은 며칠 뒤에도 올 수 있어 넉넉히. 작업 하나에 후보 수십 개라 몇천 건이어도 수십 MB 안쪽
+KEEP_FOR = timedelta(days=7)
 
-URL_VAR = "MYSQL_URL"
-TABLE = "ai_generation_jobs"
-DUPLICATE_KEY = 1062  # MySQL 오류 번호: UNIQUE 칸에 같은 값
-
-SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS {TABLE} (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    message_id VARCHAR(64) NOT NULL,
-    job_id BIGINT NOT NULL,
-    attempt INT NOT NULL,
-    job_type VARCHAR(16) NOT NULL,
-    status VARCHAR(16) NOT NULL,
-    lease_until DATETIME NOT NULL,
-    kept_candidates JSON NULL,
-    error_code VARCHAR(64) NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_message_id (message_id),
-    KEY idx_job_status (job_id, status),
-    KEY idx_status_lease (status, lease_until)
-)
-"""
-
-_pool: aiomysql.Pool | None = None
+# messageId → 받은 시각. dict 는 넣은 순서를 지키므로 앞에서부터 지우면 된다
+_seen: dict[str, datetime] = {}
+# BE jobId → (attempt, 남긴 후보 [{content_id, notice}], 적은 시각)
+_kept: dict[int, tuple[int, list[dict], datetime]] = {}
 
 
-def mysql_url() -> str | None:
-    return os.environ.get(URL_VAR, "").strip() or None
-
-
-async def start() -> None:
-    """연결을 열고 테이블이 없으면 만든다. 주소가 없거나 연결이 안 되면 서버 시작을 멈춘다."""
-    global _pool
-    url = mysql_url()
-    if url is None:
-        raise RuntimeError(f"RABBITMQ_URL 을 쓰려면 {URL_VAR} 도 필요합니다")
-    parts = urlparse(url)
-    _pool = await aiomysql.create_pool(
-        host=parts.hostname,
-        port=parts.port or 3306,
-        user=unquote(parts.username or ""),
-        password=unquote(parts.password or ""),
-        db=parts.path.lstrip("/"),
-        autocommit=True,
-        charset="utf8mb4",
-        # 시각은 DB 기준으로 맞춘다 (lease_until 을 DB 의 NOW() 로 계산)
-        init_command="SET time_zone = '+09:00'",
-        # 처리 칸(기본 3)마다 끝날 때 한 번씩 쓴다. 넉넉하게
-        maxsize=10,
-    )
-    await _execute(SCHEMA)
-
-
-async def stop() -> None:
-    if _pool is None:
-        return
-    _pool.close()
-    await _pool.wait_closed()
-
-
-async def insert(
-    message_id: str, job_id: int, attempt: int, job_type: str, lease_seconds: int
-) -> bool:
-    """
-    PROCESSING 으로 한 줄 넣는다. 이미 있는 messageId 면 False (중복 — 실행하지 않는다).
-    autocommit 이라 돌아오면 이미 저장돼 있다. 그다음에 ACK 한다.
-    """
-    try:
-        await _execute(
-            f"INSERT INTO {TABLE} "
-            "(message_id, job_id, attempt, job_type, status, lease_until) "
-            "VALUES (%s, %s, %s, %s, 'PROCESSING', NOW() + INTERVAL %s SECOND)",
-            (message_id, job_id, attempt, job_type, lease_seconds),
-        )
-    except pymysql.err.IntegrityError as exc:
-        if exc.args[0] == DUPLICATE_KEY:
-            return False
-        raise
+def insert(message_id: str) -> bool:
+    """처음 본 messageId 면 기억하고 True. 이미 받은 것이면 False (중복 — 실행하지 않는다)."""
+    _prune()
+    if message_id in _seen:
+        return False
+    _seen[message_id] = datetime.now()
     return True
 
 
-async def finish(
-    message_id: str,
-    status: str,
-    error_code: str | None,
-    kept: list[dict] | None = None,
-) -> bool:
-    """
-    끝난 상태를 적는다. kept 는 남긴 후보 [{content_id, notice}] — 성공한 작업만 넘긴다.
-    PROCESSING 인 줄만 바꾼다. False 면 이미 복구(claim_expired)가 FAILED 로 처리한 작업이다.
-    """
-    changed = await _change(
-        f"UPDATE {TABLE} SET status = %s, error_code = %s, kept_candidates = %s "
-        "WHERE message_id = %s AND status = 'PROCESSING'",
-        (
-            status,
-            error_code,
-            None if kept is None else json.dumps(kept, ensure_ascii=False),
-            message_id,
-        ),
-    )
-    return changed == 1
+def remove(message_id: str) -> None:
+    """받은 기록을 지운다. ACK 전에 멈춰 메시지가 재배달될 때만 (consumer._handle)."""
+    _seen.pop(message_id, None)
 
 
-async def claim_expired(error_code: str) -> list[tuple[str, int, int]]:
-    """
-    처리하다 죽은 작업을 FAILED 로 바꾸고 (message_id, job_id, attempt) 를 돌려준다.
-    기한(lease_until)이 지난 PROCESSING 줄만 — 기한 안이면 아직 도는 중일 수 있다 (다른 Pod 포함).
-    한 줄씩 status 를 조건으로 바꿔, 여러 Pod 가 동시에 돌아도 한 곳만 가져간다.
-    """
-    rows = await _execute(
-        f"SELECT message_id, job_id, attempt FROM {TABLE} "
-        "WHERE status = 'PROCESSING' AND lease_until < NOW()"
-    )
-    claimed = []
-    for message_id, job_id, attempt in rows:
-        changed = await _change(
-            f"UPDATE {TABLE} SET status = 'FAILED', error_code = %s "
-            "WHERE message_id = %s AND status = 'PROCESSING'",
-            (error_code, message_id),
-        )
-        if changed == 1:
-            claimed.append((message_id, job_id, attempt))
-    return claimed
+def keep(job_id: int, attempt: int, kept: list[dict]) -> None:
+    """성공한 작업이 남긴 후보를 적는다. 사용자 재시도로 attempt 가 여럿이면 마지막 것만."""
+    old = _kept.pop(job_id, None)
+    if old is not None and old[0] > attempt:
+        kept, attempt = old[1], old[0]
+    # 지웠다 다시 넣어 맨 뒤로 보낸다 (_prune 이 앞에서부터 본다)
+    _kept[job_id] = (attempt, kept, datetime.now())
 
 
-async def remove(message_id: str) -> None:
-    """넣은 줄을 지운다. ACK 전에 멈춰 메시지가 재배달될 때만 (consumer._forget)."""
-    await _execute(f"DELETE FROM {TABLE} WHERE message_id = %s", (message_id,))
+def kept_candidates(job_id: int) -> list[dict] | None:
+    """BE 작업 하나(jobId)가 남긴 후보. 재생성의 source_job_id 로 찾는다. 없으면 None."""
+    entry = _kept.get(job_id)
+    return None if entry is None else entry[1]
 
 
-async def kept_candidates(job_id: int) -> list[dict] | None:
-    """
-    BE 작업 하나(jobId)가 남긴 후보. 재생성의 source_job_id 로 찾는다.
-    사용자 재시도로 attempt 가 여럿이면 성공한 것 중 마지막. 없으면 None.
-    """
-    rows = await _execute(
-        f"SELECT kept_candidates FROM {TABLE} "
-        "WHERE job_id = %s AND status = 'COMPLETED' AND kept_candidates IS NOT NULL "
-        "ORDER BY attempt DESC LIMIT 1",
-        (job_id,),
-    )
-    if not rows:
-        return None
-    return json.loads(rows[0][0])
-
-
-async def _execute(sql: str, args: tuple = ()) -> list[tuple]:
-    async with _pool.acquire() as conn:
-        async with conn.cursor() as cursor:
-            await cursor.execute(sql, args)
-            return list(await cursor.fetchall())
-
-
-async def _change(sql: str, args: tuple = ()) -> int:
-    """바꾼 줄 수를 돌려준다."""
-    async with _pool.acquire() as conn:
-        async with conn.cursor() as cursor:
-            return await cursor.execute(sql, args)
+def _prune() -> None:
+    limit = datetime.now() - KEEP_FOR
+    while _seen and next(iter(_seen.values())) < limit:
+        del _seen[next(iter(_seen))]
+    while _kept and next(iter(_kept.values()))[2] < limit:
+        del _kept[next(iter(_kept))]
