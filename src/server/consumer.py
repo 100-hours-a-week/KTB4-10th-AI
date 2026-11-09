@@ -2,7 +2,8 @@
 src/server/consumer.py
 
 RabbitMQ 큐(guidebook.generation)에서 생성·재생성 요청을 꺼내 작업으로 돌린다.
-계약은 BE 문서(docs/mq-transition.md 3·4장). HTTP 접수(src/main.py)는 전환이 끝날 때까지 같이 둔다.
+계약은 BE #331 문서(docs/AI-MQ-소비-및-완전-전환.md).
+HTTP 접수(src/main.py)는 전환이 끝날 때까지 같이 둔다.
 
 **처리 칸이 빌 때만 꺼낸다.** 지금은 BE 가 동시 3건만 보내 주지만, MQ 로 바뀌면 그 제한이 없어진다.
 받는 대로 꺼내 메모리에 쌓으면 재시작할 때 잃는다 — 기다리는 요청은 RabbitMQ 에 남겨 둔다.
@@ -12,7 +13,7 @@ prefetch 1 이라 칸을 기다리는 동안 브로커는 다음 메시지를 �
 연결이 끊길 때 재배달돼 LLM 비용이 두 번 나간다. ACK 뒤의 실패는 FAILED 콜백으로 알린다.
 
 큐·교환기는 BE 가 선언한다 (quorum · retry · DLX 설정). 여기서 다른 설정으로 선언하면 브로커가
-채널을 닫으므로, 이름으로 찾기만 한다. 로컬에서는 scripts/mq_local.py setup 이 BE 대신 만든다.
+채널을 닫으므로, 이름으로 찾기만 한다. 로컬에서도 BE 를 먼저 띄워 큐를 만들게 한다.
 
 중복·재생성 후보(A안)는 메모리에 기억한다 (src/server/store.py). DB 는 쓰지 않는다.
 처리하다 서버가 죽은 작업은 BE 가 제한 시간(15분)으로 실패 처리한다.

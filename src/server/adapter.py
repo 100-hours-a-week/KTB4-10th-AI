@@ -203,7 +203,7 @@ def to_feedback(payload: dict) -> tuple[str, str | None]:
 
 def to_previous_plan(items: object) -> list[PlanItem]:
     """
-    MQ 재생성 메시지의 previous_plan. BE 가 저장한 지금 일정이다 (docs/mq-transition.md 3장).
+    MQ 재생성 메시지의 previous_plan. BE 가 저장한 지금 일정이다 (BE #331 문서).
     HTTP 재생성은 원래 작업에서 되돌리므로(nodes.plan_from_itinerary) 이 칸을 받지 않는다.
     """
     if not isinstance(items, list) or not items:
