@@ -122,20 +122,13 @@ def _event(job: dict, message: str, progress: dict | None) -> dict:
         "event_id": str(uuid.uuid4()),
         "request_id": job["request_id"],
         "sequence": sequence,
+        # MQ 작업은 request_id 와 같은 messageId({jobId}-{attempt}). HTTP 작업과 칸이 같다 (BE #331)
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "progress": progress,
+        "result": job["result"],
+        "error": job["error"],
     }
-    # MQ 작업은 BE 가 정한 번호로 알린다 (justin 님과 11/8). AI 가 만든 job_id 는 보내지 않는다.
-    # HTTP 작업은 전환이 끝날 때까지 옛 형식 그대로
-    if "backend_job_id" in job:
-        data["backend_job_id"] = job["backend_job_id"]
-        data["attempt"] = job["attempt"]
-    else:
-        data["job_id"] = job["job_id"]
-    data.update(
-        status=job["status"],
-        progress=progress,
-        result=job["result"],
-        error=job["error"],
-    )
     return {"message": message, "data": data}
 
 
@@ -233,15 +226,9 @@ def _log_attempt(event: dict, attempt: int, outcome: str, status: int | None) ->
 def _ids(event: dict) -> dict:
     """로그에 남길 식별자. 토큰은 넣지 않는다."""
     data = event["data"]
-    ids = {
+    return {
         "event_id": data["event_id"],
         "request_id": data["request_id"],
+        "job_id": data["job_id"],
         "sequence": data["sequence"],
     }
-    for key in ("job_id", "backend_job_id"):
-        if key in data:
-            ids[key] = data[key]
-    # 작업 회차. 로그의 attempt 는 전송 횟수(_log_attempt)라 이름을 달리한다
-    if "attempt" in data:
-        ids["job_attempt"] = data["attempt"]
-    return ids

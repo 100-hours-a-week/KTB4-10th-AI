@@ -65,7 +65,7 @@ class InvalidMessage(Exception):
 @dataclass
 class Envelope:
     message_id: str
-    job_id: int  # BE generation_jobs.id. 콜백의 backend_job_id (6단계)
+    job_id: int  # BE generation_jobs.id. 남긴 후보(store)를 이 번호로 찾는다
     attempt: int
     job_type: str
     input: dict
@@ -316,8 +316,6 @@ def _reject(envelope: Envelope, exc: adapter.InputError) -> None:
     job = {
         "job_id": envelope.message_id,
         "request_id": envelope.message_id,
-        "backend_job_id": envelope.job_id,
-        "attempt": envelope.attempt,
         "status": "failed",
         "result": None,
         "error": {"code": exc.code, "message": exc.reason},
