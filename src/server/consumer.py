@@ -434,8 +434,5 @@ async def _recover() -> None:
             "status": "failed",
             "result": None,
             "error": {"code": INTERRUPTED_CODE, "message": INTERRUPTED_MESSAGE},
-            # 죽기 전에 진행 알림을 최대 단계 수만큼 보냈을 수 있다. 그보다 큰 번호로 보내야
-            # BE 가 순서 늦은 알림으로 보고 버리지 않는다
-            "callback_sequence": len(callback.PROGRESS_MESSAGES),
         }
         callback.notify_final(job)
