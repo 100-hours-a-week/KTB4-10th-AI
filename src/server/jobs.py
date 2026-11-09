@@ -196,6 +196,54 @@ def accept_regeneration(
     return job
 
 
+def accept_message(
+    trip: TripRequest,
+    places: list[Candidate],
+    events: list[Candidate],
+    message_id: str,
+    backend_job_id: int,
+    attempt: int,
+    request: dict,
+    regeneration: dict | None = None,
+) -> dict:
+    """
+    RabbitMQ 메시지로 받은 작업을 저장소에 넣는다. 큐(job_queue)에는 넣지 않는다 —
+    consumer 가 처리 칸을 잡은 뒤 run() 으로 바로 돌린다 (src/server/consumer.py).
+
+    job_id 는 messageId 다. 같은 BE 작업이라도 사용자 재시도(attempt)마다 다른 작업이다.
+    콜백은 backend_job_id(BE jobId)·attempt 로 나간다 (callback._event).
+    regeneration 은 재생성일 때만: source_job_id · previous_plan · feedback · title.
+    """
+    _purge_expired()
+
+    job = {
+        "job_id": message_id,
+        "status": "pending",
+        "result": None,
+        "error": None,
+        "trip": trip,
+        "places": places,
+        "events": events,
+        "fingerprint": None,
+        "request_id": message_id,
+        "backend_job_id": backend_job_id,
+        "attempt": attempt,
+        "request": request,
+        "accepted_at": datetime.now(dates.KST),
+        **(regeneration or {}),
+    }
+    jobs[message_id] = job
+    return job
+
+
+async def run(job: dict, on_finished) -> None:
+    """
+    accept_message 로 넣은 작업 하나를 돌린다. 예외는 _process 가 전부 작업에 적는다.
+    on_finished 는 끝난 작업을 기억한다 (성공하면 남긴 후보 — 재생성이 쓴다). 콜백보다 먼저.
+    """
+    await _process(job, on_finished)
+
+
 def _enqueue(job: dict) -> None:
     """저장소에 넣고 큐에 넣는다. 큐가 만원이면 저장소에서 다시 빼고 QueueFull 을 올린다."""
     # 저장소(jobs)에 먼저 넣는다. 큐에 먼저 넣으면 워커가 꺼냈을 때 저장소에 아직 없을 수 있다.
@@ -223,7 +271,8 @@ def _purge_expired() -> None:
             continue
         if now - job["accepted_at"] > JOB_TTL:
             del jobs[job_id]
-            del request_map[job["request_id"]]
+            # MQ 작업(accept_message)은 request_map 에 없다
+            request_map.pop(job["request_id"], None)
 
 
 def accepted(job: dict) -> dict:
@@ -253,7 +302,7 @@ async def worker() -> None:
         # stop()의 job_queue.join()이 영원히 기다리지 않는다.
 
 
-async def _process(job: dict) -> None:
+async def _process(job: dict, on_finished=None) -> None:
     job["status"] = "processing"
 
     metrics.start_job_timing()
@@ -287,6 +336,8 @@ async def _process(job: dict) -> None:
     finally:
         metrics.JOB_DURATION.observe(time.monotonic() - started)
 
+    if on_finished is not None:
+        await on_finished(job)
     callback.notify_final(job)
     _save_generation(job)
 
@@ -344,7 +395,8 @@ async def _generate(job: dict) -> Itinerary:
     is_regeneration = "source_job_id" in job
     name = "regenerate" if is_regeneration else "generate"
     metadata = {
-        "job_id": job["job_id"],
+        # MQ 작업은 BE 번호로 찾는다 (#76). HTTP 작업은 AI 가 만든 번호
+        "job_id": job.get("backend_job_id", job["job_id"]),
         "source_job_id": job.get("source_job_id"),
         "user_request": job["trip"].user_request,
     }
@@ -368,17 +420,26 @@ def _regenerate(job: dict, on_step) -> Itinerary:
     재생성 1회. 후보는 원래 작업 것을 그대로 쓴다 — 피드백으로 뺀 곳은 이 작업의
     배치에서 이미 빠져 있고, 다음 재생성은 그 배치에서 시작한다 (10-17 다시 정함).
     """
-    previous = job["previous_itinerary"]
+    # MQ 재생성은 이전 배치·제목을 메시지로 받는다 (accept_message).
+    # HTTP 재생성은 원래 작업의 일정에서 되돌린다
+    previous = job.get("previous_itinerary")
+    if "previous_plan" in job:
+        previous_plan = job["previous_plan"]
+    else:
+        previous_plan = nodes.plan_from_itinerary(previous)
     itinerary = graph.run_regeneration(
         job["trip"],
         places=job["places"],
         events=job["events"],
-        previous_plan=nodes.plan_from_itinerary(previous),
+        previous_plan=previous_plan,
         feedback=job["feedback"],
         on_step=on_step,
     )
     # 제목만 바꾸는 재생성은 없다 — title 이 없으면 이전 제목 그대로
-    itinerary.title = job["title"] or previous.title
+    if job["title"]:
+        itinerary.title = job["title"]
+    elif previous is not None:
+        itinerary.title = previous.title
     return itinerary
 
 

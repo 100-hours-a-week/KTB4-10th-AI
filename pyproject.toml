@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    # 생성 요청을 RabbitMQ 에서 받는다 (src/server/consumer.py)
+    "aio-pika>=10.2.2",
     "anthropic>=1.7.0",
     "fastapi>=0.141.1",
     # 백엔드 콜백 전송 (callback_message). 비동기로 보내 이벤트 루프를 막지 않는다

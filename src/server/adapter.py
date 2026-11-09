@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from src import dates
 from src.engine import data
 from src.engine.data import DataError
-from src.models import Candidate, Itinerary, TripRequest
+from src.models import Candidate, Itinerary, PlanItem, TripRequest
 from src.output import book_html
 
 MAX_DAYS = 7  # 계약 2장
@@ -199,6 +199,19 @@ def to_feedback(payload: dict) -> tuple[str, str | None]:
             "invalid_request", f"title 이 문자열이 아니거나 {MAX_TITLE}자를 넘는다"
         )
     return feedback, title
+
+
+def to_previous_plan(items: object) -> list[PlanItem]:
+    """
+    MQ 재생성 메시지의 previous_plan. BE 가 저장한 지금 일정이다 (BE #331 문서).
+    HTTP 재생성은 원래 작업에서 되돌리므로(nodes.plan_from_itinerary) 이 칸을 받지 않는다.
+    """
+    if not isinstance(items, list) or not items:
+        raise InputError("invalid_request", "previous_plan 이 비었습니다")
+    try:
+        return [PlanItem.model_validate(item) for item in items]
+    except ValidationError as exc:
+        raise InputError("invalid_request", f"previous_plan 형식: {exc}") from exc
 
 
 def to_candidates(contents: object) -> tuple[list[Candidate], list[Candidate]]:
