@@ -5,12 +5,23 @@ const prev = document.getElementById("prev");
 const next = document.getElementById("next");
 let cur = 0;
 
-// 쪽(520 x 746)이 화면에 통째로 들어가는 비율. 좌우 16px · 위 24px · 아래 버튼 자리 80px 를 뺀다.
+// 쪽(520 x 746)이 화면에 통째로 들어가는 비율. 좌우 16px · 위 여유 24px · 아래 버튼 자리 80px 를 뺀다.
 // 큰 화면에서는 키우지 않는다
 const fit = () => {
   const z = Math.min(1, (innerWidth - 32) / 520, (innerHeight - 104) / 746);
   book.style.setProperty("--z", z.toFixed(4));
 };
+// 장소 사진 높이: 원래 325px. 글이 가장 긴 장소 쪽이 넘치면 그 쪽에 맞춰 모든 장소 사진을 같이 줄인다 (최소 220px).
+// 쪽을 줄이기(fit) 전, 원래 크기에서 한 번만 잰다 — 글 높이는 사진 높이와 상관없다
+const fitPhotos = () => {
+  const placePages = [...document.querySelectorAll(".page.place")];
+  const textHeights = placePages.map((page) => page.querySelector(".pad").offsetHeight);
+  const tallestText = Math.max(0, ...textHeights);
+  const room = 746 - tallestText;
+  const photoHeight = Math.max(220, Math.min(325, room));
+  book.style.setProperty("--photo-h", photoHeight + "px");
+};
+fitPhotos();
 fit();
 addEventListener("resize", fit);
 

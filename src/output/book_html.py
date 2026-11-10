@@ -6,6 +6,7 @@ src/output/book_html.py
 (2026-09-28). 색은 팀 피그마(차콜 #222 · 레드 #FF383C · 배경 #EFEFF0)다.
 
     표지 → 여행 정보·목차 → 한눈에 보기 → (일차 챕터 → 장소 한 곳씩) × N → 행사 → 뒷표지
+    (3일 이하는 목차 대신 한눈에 보기를 여행 정보 쪽에 넣어 두 쪽을 하나로)
 
 팀원 것과 다른 점 — 우리가 먼저 정한 것을 따랐다:
 - **직선거리를 싣지 않는다.** 실제 이동거리가 아니라 오해를 부른다 (2026-09-26 결정).
@@ -39,11 +40,16 @@ PRETENDARD = (
 def render(request: TripRequest, itinerary: Itinerary) -> str:
     """일정 하나 -> HTML 문서 한 장."""
     # (클래스, 안쪽 내용, 배경 사진). 껍데기와 쪽 번호는 _page 가 한 곳에서 붙인다
-    contents = [
-        ("cover", _cover(request, itinerary), itinerary.cover_image_url),
-        ("info", _info(request, itinerary), None),
-        ("glance", _glance(itinerary), None),
-    ]
+    contents = [("cover", _cover(request, itinerary), itinerary.cover_image_url)]
+    # 3일 이하는 한눈에 보기가 짧아 목차 자리에 넣고 쪽 하나를 줄인다
+    day_count = itinerary.summary.day_count
+    if day_count <= 3:
+        small_title = f'<div class="gtitle">한눈에 보는 {day_count}일</div>'
+        glance_part = small_title + _glance_rows(itinerary)
+        contents.append(("info merged", _info(request, itinerary, glance_part), None))
+    else:
+        contents.append(("info", _info(request, itinerary, _toc(itinerary)), None))
+        contents.append(("glance", _glance(itinerary), None))
     for day in itinerary.itinerary:
         contents.append(("chapter", _chapter(day), None))
         for place in day.places:
@@ -97,8 +103,8 @@ def _cover(request: TripRequest, itinerary: Itinerary) -> str:
     )
 
 
-def _info(request: TripRequest, itinerary: Itinerary) -> str:
-    """여행 정보와 목차."""
+def _info(request: TripRequest, itinerary: Itinerary, lower: str) -> str:
+    """여행 정보. 아래에는 목차(4일 이상)나 한눈에 보기(3일 이하)가 들어간다."""
     summary = itinerary.summary
     facts = [
         ("지역", _full_region(itinerary)),
@@ -114,19 +120,16 @@ def _info(request: TripRequest, itinerary: Itinerary) -> str:
         f"<dt>{label}</dt><dd>{_text(value)}</dd>" for label, value in facts if value
     )
 
-    toc = "".join(_toc_row(day) for day in itinerary.itinerary)
-    if itinerary.unscheduled_events:
-        count = len(itinerary.unscheduled_events)
-        toc += (
-            '<li><span class="d">EVENT</span><span class="t">여행 기간 중 열리는 행사</span>'
-            f'<span class="n">{count}건</span></li>'
-        )
-
     return (
-        '<div class="pad"><div class="eyebrow">Trip Info</div><h2>이 가이드북의 여행</h2>'
-        f'<dl class="facts">{fact_html}</dl>'
-        f'<div class="eyebrow">Contents</div><ul class="toc">{toc}</ul></div>'
+        '<div class="pad"><div class="eyebrow">Trip Info</div><h2>가이드북 여행 정보</h2>'
+        f'<dl class="facts">{fact_html}</dl>{lower}</div>'
     )
+
+
+def _toc(itinerary: Itinerary) -> str:
+    """목차 — 일차마다 한 줄. 못 넣은 행사 줄은 11-10 뺐다 (행사 쪽은 그대로)."""
+    rows = "".join(_toc_row(day) for day in itinerary.itinerary)
+    return f'<div class="eyebrow">Contents</div><ul class="toc">{rows}</ul>'
 
 
 def _toc_row(day: ItineraryDay) -> str:
@@ -141,7 +144,16 @@ def _toc_row(day: ItineraryDay) -> str:
 
 
 def _glance(itinerary: Itinerary) -> str:
-    """한눈에 보기 — 일차마다 시각과 장소를 잇는다."""
+    """한눈에 보기 쪽 (4일 이상)."""
+    day_count = itinerary.summary.day_count
+    return (
+        '<div class="pad"><div class="eyebrow">At a Glance</div>'
+        f"<h2>한눈에 보는 {day_count}일</h2>{_glance_rows(itinerary)}</div>"
+    )
+
+
+def _glance_rows(itinerary: Itinerary) -> str:
+    """한눈에 보기 일정 — 일차마다 시각과 장소를 잇는다."""
     rows = []
     for day in itinerary.itinerary:
         stops = "<i>→</i>".join(
@@ -153,12 +165,7 @@ def _glance(itinerary: Itinerary) -> str:
             f"<small>{_month_day(day.date)}</small></div>"
             f'<div class="chain">{stops}</div></div>'
         )
-
-    day_count = itinerary.summary.day_count
-    return (
-        '<div class="pad"><div class="eyebrow">At a Glance</div>'
-        f'<h2>한눈에 보는 {day_count}일</h2><div class="glance">{"".join(rows)}</div></div>'
-    )
+    return f'<div class="glance">{"".join(rows)}</div>'
 
 
 def _chapter(day: ItineraryDay) -> str:
