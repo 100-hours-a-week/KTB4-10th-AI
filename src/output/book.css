@@ -1,0 +1,288 @@
+:root {
+  --ink:#222222;
+  --sub:#61646B;
+  --faint:#AFB1B6;
+  --bg:#EFEFF0;
+  --paper:#FAFAFA;
+  --accent:#FF383C;
+  --soft:#F1F1F3;
+}
+* { box-sizing:border-box; }
+body {
+  margin:0;
+  background:var(--bg);
+  color:var(--ink);
+  font-family:"Pretendard",-apple-system,"Apple SD Gothic Neo",sans-serif;
+  line-height:1.65;
+}
+/* 화면: 책처럼 한 쪽씩 옆으로 넘긴다 (스와이프·화살표 키·아래 버튼) */
+.book {
+  height:100vh;
+  display:flex;
+  align-items:center;
+  gap:24px;
+  overflow-x:auto;
+  overflow-y:hidden;
+  scroll-snap-type:x mandatory;
+  scrollbar-width:none;
+  padding:0 max(16px, calc(50vw - var(--pw) * var(--z) / 2)) 80px;
+}
+.book::-webkit-scrollbar { display:none; }
+/* 모든 쪽은 PDF 한 장과 같은 520 x 746px 로 짠다 (표지 비율 3:4.3).
+   화면이 작으면 쪽을 글자째 같은 비율로 줄인다 (--z, 아래 NAV 스크립트가 화면 크기로 정한다).
+   쪽 크기만 줄이면 글이 쪽 밖으로 넘쳐 휴대폰에서 쪽마다 스크롤이 생긴다 */
+.book {
+  --pw:520px;
+  --ph:746px;
+  --z:1;
+}
+.page {
+  zoom:var(--z);
+  flex:none;
+  width:var(--pw);
+  height:var(--ph);
+  min-width:0;
+  scroll-snap-align:center;
+  scroll-snap-stop:always;
+  overflow-y:auto;
+  background:var(--paper);
+  border-radius:6px;
+  box-shadow:0 2px 14px rgba(0,0,0,.08);
+  position:relative;
+}
+.nav {
+  position:fixed;
+  left:0;
+  right:0;
+  bottom:20px;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  gap:16px;
+}
+.nav button {
+  width:40px;
+  height:40px;
+  border-radius:50%;
+  border:0;
+  background:var(--ink);
+  color:#fff;
+  font-size:18px;
+  cursor:pointer;
+}
+.nav button:disabled { opacity:.25; cursor:default; }
+.nav span { font-size:13px; color:var(--sub); min-width:56px; text-align:center; }
+.pad { padding:32px 28px; }
+.pno { position:absolute; bottom:12px; right:18px; font-size:11px; color:var(--faint); }
+.eyebrow {
+  font-size:11px;
+  letter-spacing:.18em;
+  color:var(--accent);
+  font-weight:700;
+  text-transform:uppercase;
+}
+h2 { font-size:24px; margin:6px 0 18px; line-height:1.3; }
+
+/* 표지 */
+.cover {
+  aspect-ratio:3/4.3;
+  color:#fff;
+  background:#222 center/cover no-repeat;
+  display:flex;
+  flex-direction:column;
+  justify-content:space-between;
+}
+.cover::before {
+  content:"";
+  position:absolute;
+  inset:0;
+  background:linear-gradient(180deg,rgba(0,0,0,.62) 0%,rgba(0,0,0,.05) 45%,rgba(0,0,0,.65) 100%);
+}
+.cover > * { position:relative; }
+.cover .top { padding:52px 26px 0; }
+.cover h1 { font-size:44px; line-height:1.08; margin:0; font-weight:900; letter-spacing:-.02em; }
+.cover .subtitle { margin-top:10px; font-size:16px; opacity:.92; }
+.tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:16px; }
+.tags span {
+  font-size:12px;
+  padding:3px 10px;
+  border-radius:999px;
+  background:rgba(255,255,255,.18);
+  border:1px solid rgba(255,255,255,.35);
+}
+/* 일수 표기는 제목보다 덜 눈에 띄게 — 오른쪽 끝 · 흐리게 */
+.cover .bottom {
+  padding:0 26px 24px;
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:8px;
+  opacity:.7;
+}
+.cover .big { font-size:40px; font-weight:900; line-height:1; }
+.cover .bottom .lbl { font-size:14px; font-weight:800; line-height:1.2; letter-spacing:.04em; }
+
+/* 정보·목차 */
+/* 목차(3일 이하는 한눈에 보기)가 정보 줄 수와 상관없이 쪽 위 400px 에서 시작하게 최소 높이로 자리를 잡는다
+   (표 위치 129 + 최소 높이 243 + 아래 여백 28). 위 여백 42px 는 h2 의 아래 여백 18px 과 겹쳐 큰 값만 적용된다.
+   min-height 가 줄을 늘리지 않게 align-content:start. 표가 더 길면 밀려 내려간다 */
+.facts {
+  display:grid;
+  grid-template-columns:auto 1fr;
+  align-content:start;
+  gap:6px 16px;
+  min-height:243px;
+  font-size:14px;
+  margin:42px 0 28px;
+}
+.facts dt { color:var(--sub); } .facts dd { margin:0; font-weight:600; }
+.toc { list-style:none; padding:0; margin:0; border-top:2px solid var(--ink); }
+.toc li {
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  padding:7px 0;
+  border-bottom:1px solid var(--soft);
+  font-size:13.5px;
+}
+.toc .d { font-weight:800; color:var(--ink); min-width:56px; }
+.toc .t { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.toc .n { color:var(--faint); font-size:13px; }
+
+/* 한눈에 보기. 7일 x 5곳도 한 쪽에 들어가게 날짜를 왼쪽에 두고, 긴 이름은 "…" 로 줄인다 */
+.glance { display:flex; flex-direction:column; gap:8px; }
+/* 일정은 제목 아래 고정 간격에서 시작 — 7일 x 5곳이 쪽 아래 여백 안에 들어가는 만큼 */
+.page.glance .glance { margin-top:38px; }
+/* 3일 이하: 목차 자리에 한눈에 보기를 넣은 쪽. 한눈에 보기가 370px 에서 시작 (129 + 213 + 28) */
+.page.info.merged .facts { min-height:213px; }
+.page.info.merged .gtitle { font-size:16px; font-weight:800; margin-bottom:12px; }
+.gday { display:flex; gap:12px; padding-bottom:8px; border-bottom:1px solid var(--soft); }
+.gday .h {
+  flex:0 0 58px;
+  font-weight:800;
+  font-size:15px;
+  line-height:1.3;
+}
+.gday .h small {
+  display:block;
+  margin-top:2px;
+  color:var(--sub);
+  font-weight:500;
+  font-size:12px;
+}
+.chain {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:4px 3px;
+  font-size:12px;
+  line-height:1.5;
+}
+.chain span {
+  background:var(--soft);
+  padding:1px 8px;
+  border-radius:999px;
+  white-space:nowrap;
+  max-width:160px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.chain i { color:var(--faint); font-style:normal; }
+
+/* 챕터 */
+.chapter .hero { aspect-ratio:4/3; background:#ccc center/cover; position:relative; }
+.chapter .hero .day {
+  position:absolute;
+  left:20px;
+  bottom:16px;
+  color:#fff;
+  font-size:56px;
+  font-weight:900;
+  line-height:1;
+  text-shadow:0 2px 12px rgba(0,0,0,.4);
+}
+.chapter .hero .day small { display:block; font-size:14px; font-weight:600; letter-spacing:.06em; }
+.chapter .eyebrow { color:var(--sub); }
+.summary { font-size:15px; color:#333; }
+.route {
+  margin-top:18px;
+  font-size:12px;
+  color:var(--sub);
+  border-top:1px solid var(--soft);
+  padding-top:12px;
+}
+
+/* 장소 */
+/* 높이는 book.js 의 fitPhotos 가 정한다 — 가이드북 하나 안에서 모두 같다 */
+.place .photo { height:var(--photo-h, 325px); background:var(--soft) center/cover; }
+.place .noimg {
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:var(--faint);
+  font-size:13px;
+}
+.badge {
+  display:inline-block;
+  background:var(--soft);
+  color:var(--ink);
+  font-size:12px;
+  font-weight:700;
+  padding:2px 10px;
+  border-radius:4px;
+}
+.place h3 { font-size:22px; margin:10px 0 4px; }
+.place .info { font-size:13px; color:var(--sub); }
+.about { margin-top:14px; font-size:14px; line-height:1.6; }
+.why { margin-top:16px; padding-left:14px; border-left:3px solid var(--ink); font-size:15px; }
+.why b {
+  display:block;
+  font-size:11px;
+  letter-spacing:.14em;
+  color:var(--ink);
+  margin-bottom:2px;
+}
+
+/* 행사 */
+/* 8건이 한 쪽에 들어가게 한 건을 두 줄로 */
+.ev { display:flex; gap:10px; padding:8px 0; border-bottom:1px solid var(--soft); }
+.ev .th { flex:0 0 44px; height:44px; border-radius:6px; background:var(--soft) center/cover; }
+.ev > div:last-child { min-width:0; }
+.ev .nm, .ev .sm { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ev .nm { font-weight:700; font-size:14px; } .ev .sm { font-size:12px; color:var(--sub); }
+.note { font-size:12px; color:var(--faint); margin-top:14px; }
+
+/* 뒷표지 */
+.back {
+  background:var(--ink);
+  color:#ddd;
+  text-align:center;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+}
+.back .logo { font-size:40px; font-weight:900; color:#fff; letter-spacing:.06em; }
+.back p { font-size:12px; line-height:1.8; margin:6px 0; }
+
+/* PDF. 화면과 같은 CSS 를 쓰고, 여기서는 종이 크기 · 쪽 나눔 · 잘림 방지만 정한다.
+   종이 한 장 = 화면의 한 쪽 (520 x 746px ≈ 표지 비율 3:4.3, 표지 745.3px 가 넘치지 않게 올림) */
+@media print {
+  @page { size:520px 746px; margin:0; }
+  * { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body { background:var(--paper); }
+  .nav { display:none; }
+  /* 화면은 옆으로 넘기는 한 줄이라 그대로 찍으면 첫 쪽만 나온다 → 위아래로 쌓는다 */
+  /* 화면용 축소(--z)는 스크립트가 .book 에 직접 넣으므로 !important 로 되돌린다 */
+  .book { --z:1 !important; display:block; height:auto; overflow:visible; padding:0; }
+  /* 화면에선 넘치는 내용을 쪽 안에서 스크롤 → 종이에선 잘리지 않게 높이를 풀어 다음 장으로 */
+  .page {
+    min-height:var(--ph);
+    height:auto;
+    overflow:visible;
+    box-shadow:none;
+    border-radius:0;
+    break-after:page;
+    break-inside:avoid;
+  }
+  .page:last-child { break-after:auto; }
+}

@@ -6,6 +6,7 @@ src/output/book_html.py
 (2026-09-28). 색은 팀 피그마(차콜 #222 · 레드 #FF383C · 배경 #EFEFF0)다.
 
     표지 → 여행 정보·목차 → 한눈에 보기 → (일차 챕터 → 장소 한 곳씩) × N → 행사 → 뒷표지
+    (3일 이하는 목차 대신 한눈에 보기를 여행 정보 쪽에 넣어 두 쪽을 하나로)
 
 팀원 것과 다른 점 — 우리가 먼저 정한 것을 따랐다:
 - **직선거리를 싣지 않는다.** 실제 이동거리가 아니라 오해를 부른다 (2026-09-26 결정).
@@ -20,12 +21,16 @@ src/output/book_html.py
 from __future__ import annotations
 
 from html import escape
+from pathlib import Path
 
 from src.engine import data
 from src.models import Itinerary, ItineraryDay, MissedEvent, PlannedPlace, TripRequest
 
 # 행사 쪽 한 장에 들어가는 수. 넘치면 "외 N건" 으로 접는다
 MAX_EVENTS_ON_PAGE = 8
+
+# book.css · book.js 가 이 파일 옆에 있다
+HERE = Path(__file__).parent
 
 PRETENDARD = (
     "https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/static/pretendard.min.css"
@@ -35,11 +40,16 @@ PRETENDARD = (
 def render(request: TripRequest, itinerary: Itinerary) -> str:
     """일정 하나 -> HTML 문서 한 장."""
     # (클래스, 안쪽 내용, 배경 사진). 껍데기와 쪽 번호는 _page 가 한 곳에서 붙인다
-    contents = [
-        ("cover", _cover(request, itinerary), itinerary.cover_image_url),
-        ("info", _info(request, itinerary), None),
-        ("glance", _glance(itinerary), None),
-    ]
+    contents = [("cover", _cover(request, itinerary), itinerary.cover_image_url)]
+    # 3일 이하는 한눈에 보기가 짧아 목차 자리에 넣고 쪽 하나를 줄인다
+    day_count = itinerary.summary.day_count
+    if day_count <= 3:
+        small_title = f'<div class="gtitle">한눈에 보는 {day_count}일</div>'
+        glance_part = small_title + _glance_rows(itinerary)
+        contents.append(("info merged", _info(request, itinerary, glance_part), None))
+    else:
+        contents.append(("info", _info(request, itinerary, _toc(itinerary)), None))
+        contents.append(("glance", _glance(itinerary), None))
     for day in itinerary.itinerary:
         contents.append(("chapter", _chapter(day), None))
         for place in day.places:
@@ -93,8 +103,8 @@ def _cover(request: TripRequest, itinerary: Itinerary) -> str:
     )
 
 
-def _info(request: TripRequest, itinerary: Itinerary) -> str:
-    """여행 정보와 목차."""
+def _info(request: TripRequest, itinerary: Itinerary, lower: str) -> str:
+    """여행 정보. 아래에는 목차(4일 이상)나 한눈에 보기(3일 이하)가 들어간다."""
     summary = itinerary.summary
     facts = [
         ("지역", _full_region(itinerary)),
@@ -110,19 +120,16 @@ def _info(request: TripRequest, itinerary: Itinerary) -> str:
         f"<dt>{label}</dt><dd>{_text(value)}</dd>" for label, value in facts if value
     )
 
-    toc = "".join(_toc_row(day) for day in itinerary.itinerary)
-    if itinerary.unscheduled_events:
-        count = len(itinerary.unscheduled_events)
-        toc += (
-            '<li><span class="d">EVENT</span><span class="t">여행 기간 중 열리는 행사</span>'
-            f'<span class="n">{count}건</span></li>'
-        )
-
     return (
-        '<div class="pad"><div class="eyebrow">Trip Info</div><h2>이 가이드북의 여행</h2>'
-        f'<dl class="facts">{fact_html}</dl>'
-        f'<div class="eyebrow">Contents</div><ul class="toc">{toc}</ul></div>'
+        '<div class="pad"><div class="eyebrow">Trip Info</div><h2>가이드북 여행 정보</h2>'
+        f'<dl class="facts">{fact_html}</dl>{lower}</div>'
     )
+
+
+def _toc(itinerary: Itinerary) -> str:
+    """목차 — 일차마다 한 줄. 못 넣은 행사 줄은 11-10 뺐다 (행사 쪽은 그대로)."""
+    rows = "".join(_toc_row(day) for day in itinerary.itinerary)
+    return f'<div class="eyebrow">Contents</div><ul class="toc">{rows}</ul>'
 
 
 def _toc_row(day: ItineraryDay) -> str:
@@ -137,7 +144,16 @@ def _toc_row(day: ItineraryDay) -> str:
 
 
 def _glance(itinerary: Itinerary) -> str:
-    """한눈에 보기 — 일차마다 시각과 장소를 잇는다."""
+    """한눈에 보기 쪽 (4일 이상)."""
+    day_count = itinerary.summary.day_count
+    return (
+        '<div class="pad"><div class="eyebrow">At a Glance</div>'
+        f"<h2>한눈에 보는 {day_count}일</h2>{_glance_rows(itinerary)}</div>"
+    )
+
+
+def _glance_rows(itinerary: Itinerary) -> str:
+    """한눈에 보기 일정 — 일차마다 시각과 장소를 잇는다."""
     rows = []
     for day in itinerary.itinerary:
         stops = "<i>→</i>".join(
@@ -149,12 +165,7 @@ def _glance(itinerary: Itinerary) -> str:
             f"<small>{_month_day(day.date)}</small></div>"
             f'<div class="chain">{stops}</div></div>'
         )
-
-    day_count = itinerary.summary.day_count
-    return (
-        '<div class="pad"><div class="eyebrow">At a Glance</div>'
-        f'<h2>한눈에 보는 {day_count}일</h2><div class="glance">{"".join(rows)}</div></div>'
-    )
+    return f'<div class="glance">{"".join(rows)}</div>'
 
 
 def _chapter(day: ItineraryDay) -> str:
@@ -309,326 +320,18 @@ def _period(start: str, end: str) -> str:
 
 # ============================================================
 # 스타일 · 넘김 — 팀원 렌더러에서 옮겼다. 직선거리(.hop) 규칙만 뺐다
+# 편집기가 CSS · JS 로 알아보게 파일로 따로 둔다
 # ============================================================
 
-CSS = """
-:root {
-  --ink:#222222;
-  --sub:#61646B;
-  --faint:#AFB1B6;
-  --bg:#EFEFF0;
-  --paper:#FFFFFF;
-  --accent:#FF383C;
-  --soft:#F1F1F3;
-}
-* { box-sizing:border-box; }
-body {
-  margin:0;
-  background:var(--bg);
-  color:var(--ink);
-  font-family:"Pretendard",-apple-system,"Apple SD Gothic Neo",sans-serif;
-  line-height:1.65;
-}
-/* 화면: 책처럼 한 쪽씩 옆으로 넘긴다 (스와이프·화살표 키·아래 버튼) */
-.book {
-  height:100vh;
-  display:flex;
-  align-items:flex-start;
-  gap:24px;
-  overflow-x:auto;
-  overflow-y:hidden;
-  scroll-snap-type:x mandatory;
-  scrollbar-width:none;
-  padding:24px max(16px, calc(50vw - var(--pw) * var(--z) / 2)) 80px;
-}
-.book::-webkit-scrollbar { display:none; }
-/* 모든 쪽은 PDF 한 장과 같은 520 x 746px 로 짠다 (표지 비율 3:4.3).
-   화면이 작으면 쪽을 글자째 같은 비율로 줄인다 (--z, 아래 NAV 스크립트가 화면 크기로 정한다).
-   쪽 크기만 줄이면 글이 쪽 밖으로 넘쳐 휴대폰에서 쪽마다 스크롤이 생긴다 */
-.book {
-  --pw:520px;
-  --ph:746px;
-  --z:1;
-}
-.page {
-  zoom:var(--z);
-  flex:none;
-  width:var(--pw);
-  height:var(--ph);
-  min-width:0;
-  scroll-snap-align:center;
-  scroll-snap-stop:always;
-  overflow-y:auto;
-  background:var(--paper);
-  border-radius:6px;
-  box-shadow:0 2px 14px rgba(0,0,0,.08);
-  position:relative;
-}
-.nav {
-  position:fixed;
-  left:0;
-  right:0;
-  bottom:20px;
-  display:flex;
-  justify-content:center;
-  align-items:center;
-  gap:16px;
-}
-.nav button {
-  width:40px;
-  height:40px;
-  border-radius:50%;
-  border:0;
-  background:var(--ink);
-  color:#fff;
-  font-size:18px;
-  cursor:pointer;
-}
-.nav button:disabled { opacity:.25; cursor:default; }
-.nav span { font-size:13px; color:var(--sub); min-width:56px; text-align:center; }
-.pad { padding:32px 28px; }
-.pno { position:absolute; bottom:12px; right:18px; font-size:11px; color:var(--faint); }
-.eyebrow {
-  font-size:11px;
-  letter-spacing:.18em;
-  color:var(--accent);
-  font-weight:700;
-  text-transform:uppercase;
-}
-h2 { font-size:24px; margin:6px 0 18px; line-height:1.3; }
-
-/* 표지 */
-.cover {
-  aspect-ratio:3/4.3;
-  color:#fff;
-  background:#222 center/cover no-repeat;
-  display:flex;
-  flex-direction:column;
-  justify-content:space-between;
-}
-.cover::before {
-  content:"";
-  position:absolute;
-  inset:0;
-  background:linear-gradient(180deg,rgba(0,0,0,.62) 0%,rgba(0,0,0,.05) 45%,rgba(0,0,0,.65) 100%);
-}
-.cover > * { position:relative; }
-.cover .top { padding:28px 26px 0; }
-.cover h1 { font-size:44px; line-height:1.08; margin:0; font-weight:900; letter-spacing:-.02em; }
-.cover .subtitle { margin-top:10px; font-size:16px; opacity:.92; }
-.tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:16px; }
-.tags span {
-  font-size:12px;
-  padding:3px 10px;
-  border-radius:999px;
-  background:rgba(255,255,255,.18);
-  border:1px solid rgba(255,255,255,.35);
-}
-.cover .bottom { padding:0 26px 24px; display:flex; align-items:center; gap:12px; }
-.cover .big { font-size:64px; font-weight:900; line-height:1; }
-.cover .bottom .lbl { font-size:14px; font-weight:800; line-height:1.2; letter-spacing:.04em; }
-
-/* 정보·목차 */
-.facts {
-  display:grid;
-  grid-template-columns:auto 1fr;
-  gap:8px 16px;
-  font-size:14px;
-  margin-bottom:28px;
-}
-.facts dt { color:var(--sub); } .facts dd { margin:0; font-weight:600; }
-.toc { list-style:none; padding:0; margin:0; border-top:2px solid var(--ink); }
-.toc li {
-  display:flex;
-  justify-content:space-between;
-  gap:12px;
-  padding:7px 0;
-  border-bottom:1px solid var(--soft);
-  font-size:13.5px;
-}
-.toc .d { font-weight:800; color:var(--accent); min-width:56px; }
-.toc .t { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.toc .n { color:var(--faint); font-size:13px; }
-
-/* 한눈에 보기. 7일 x 5곳도 한 쪽에 들어가게 날짜를 왼쪽에 두고, 긴 이름은 "…" 로 줄인다 */
-.glance { display:flex; flex-direction:column; gap:8px; }
-.gday { display:flex; gap:12px; padding-bottom:8px; border-bottom:1px solid var(--soft); }
-.gday .h {
-  flex:0 0 58px;
-  font-weight:800;
-  font-size:15px;
-  line-height:1.3;
-}
-.gday .h small {
-  display:block;
-  margin-top:2px;
-  color:var(--sub);
-  font-weight:500;
-  font-size:12px;
-}
-.chain {
-  display:flex;
-  flex-wrap:wrap;
-  align-items:center;
-  gap:4px 3px;
-  font-size:12px;
-  line-height:1.5;
-}
-.chain span {
-  background:var(--soft);
-  padding:1px 8px;
-  border-radius:999px;
-  white-space:nowrap;
-  max-width:160px;
-  overflow:hidden;
-  text-overflow:ellipsis;
-}
-.chain i { color:var(--faint); font-style:normal; }
-
-/* 챕터 */
-.chapter .hero { aspect-ratio:4/3; background:#ccc center/cover; position:relative; }
-.chapter .hero .day {
-  position:absolute;
-  left:20px;
-  bottom:16px;
-  color:#fff;
-  font-size:56px;
-  font-weight:900;
-  line-height:1;
-  text-shadow:0 2px 12px rgba(0,0,0,.4);
-}
-.chapter .hero .day small { display:block; font-size:14px; font-weight:600; letter-spacing:.06em; }
-.summary { font-size:15px; color:#333; }
-.route {
-  margin-top:18px;
-  font-size:12px;
-  color:var(--sub);
-  border-top:1px solid var(--soft);
-  padding-top:12px;
-}
-
-/* 장소 */
-.place .photo { aspect-ratio:16/10; background:var(--soft) center/cover; }
-.place .noimg {
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  color:var(--faint);
-  font-size:13px;
-}
-.badge {
-  display:inline-block;
-  background:var(--accent);
-  color:#fff;
-  font-size:12px;
-  font-weight:700;
-  padding:2px 10px;
-  border-radius:4px;
-}
-.place h3 { font-size:22px; margin:10px 0 4px; }
-.place .info { font-size:13px; color:var(--sub); }
-.about { margin-top:14px; font-size:14px; line-height:1.6; }
-.why { margin-top:16px; padding-left:14px; border-left:3px solid var(--accent); font-size:15px; }
-.why b {
-  display:block;
-  font-size:11px;
-  letter-spacing:.14em;
-  color:var(--accent);
-  margin-bottom:2px;
-}
-
-/* 행사 */
-/* 8건이 한 쪽에 들어가게 한 건을 두 줄로 */
-.ev { display:flex; gap:10px; padding:8px 0; border-bottom:1px solid var(--soft); }
-.ev .th { flex:0 0 44px; height:44px; border-radius:6px; background:var(--soft) center/cover; }
-.ev > div:last-child { min-width:0; }
-.ev .nm, .ev .sm { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.ev .nm { font-weight:700; font-size:14px; } .ev .sm { font-size:12px; color:var(--sub); }
-.note { font-size:12px; color:var(--faint); margin-top:14px; }
-
-/* 뒷표지 */
-.back {
-  background:var(--ink);
-  color:#ddd;
-  text-align:center;
-  display:flex;
-  flex-direction:column;
-  justify-content:center;
-}
-.back .logo { font-size:40px; font-weight:900; color:#fff; letter-spacing:.06em; }
-.back p { font-size:12px; line-height:1.8; margin:6px 0; }
-
-/* PDF. 화면과 같은 CSS 를 쓰고, 여기서는 종이 크기 · 쪽 나눔 · 잘림 방지만 정한다.
-   종이 한 장 = 화면의 한 쪽 (520 x 746px ≈ 표지 비율 3:4.3, 표지 745.3px 가 넘치지 않게 올림) */
-@media print {
-  @page { size:520px 746px; margin:0; }
-  * { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-  body { background:var(--paper); }
-  .nav { display:none; }
-  /* 화면은 옆으로 넘기는 한 줄이라 그대로 찍으면 첫 쪽만 나온다 → 위아래로 쌓는다 */
-  /* 화면용 축소(--z)는 스크립트가 .book 에 직접 넣으므로 !important 로 되돌린다 */
-  .book { --z:1 !important; display:block; height:auto; overflow:visible; padding:0; }
-  /* 화면에선 넘치는 내용을 쪽 안에서 스크롤 → 종이에선 잘리지 않게 높이를 풀어 다음 장으로 */
-  .page {
-    min-height:var(--ph);
-    height:auto;
-    overflow:visible;
-    box-shadow:none;
-    border-radius:0;
-    break-after:page;
-    break-inside:avoid;
-  }
-  .page:last-child { break-after:auto; }
-}
-"""
+CSS = (HERE / "book.css").read_text(encoding="utf-8")
+SCRIPT = (HERE / "book.js").read_text(encoding="utf-8")
 
 # 쪽 넘기기 버튼·키보드. 인쇄(PDF)에서는 숨긴다
-NAV = """<nav class="nav">
-<button id="prev" aria-label="이전 쪽">‹</button>
-<span id="pos"></span>
-<button id="next" aria-label="다음 쪽">›</button>
-</nav>
-<script>
-const book = document.querySelector(".book");
-const pages = [...book.querySelectorAll(".page")];
-const pos = document.getElementById("pos");
-const prev = document.getElementById("prev");
-const next = document.getElementById("next");
-let cur = 0;
-
-// 쪽(520 x 746)이 화면에 통째로 들어가는 비율. 좌우 16px · 위 24px · 아래 버튼 자리 80px 를 뺀다.
-// 큰 화면에서는 키우지 않는다
-const fit = () => {
-  const z = Math.min(1, (innerWidth - 32) / 520, (innerHeight - 104) / 746);
-  book.style.setProperty("--z", z.toFixed(4));
-};
-fit();
-addEventListener("resize", fit);
-
-const go = (i) => {
-  const target = pages[Math.max(0, Math.min(pages.length - 1, i))];
-  target.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
-};
-const show = () => {
-  pos.textContent = `${cur + 1} / ${pages.length}`;
-  prev.disabled = cur === 0;
-  next.disabled = cur === pages.length - 1;
-};
-// 화면 가운데에 가장 가까운 쪽이 지금 쪽이다
-const centerOf = (p) => p.offsetLeft + p.offsetWidth / 2;
-book.addEventListener("scroll", () => {
-  const mid = book.scrollLeft + book.clientWidth / 2;
-  const nearer = (best, p, k) =>
-    Math.abs(centerOf(p) - mid) < Math.abs(centerOf(pages[best]) - mid) ? k : best;
-  const i = pages.reduce(nearer, 0);
-  if (i !== cur) { cur = i; show(); }
-}, { passive: true });
-
-prev.onclick = () => go(cur - 1);
-next.onclick = () => go(cur + 1);
-document.addEventListener("keydown", (e) => {
-  if (e.key === "ArrowRight") go(cur + 1);
-  if (e.key === "ArrowLeft") go(cur - 1);
-});
-show();
-</script>"""
+NAV = (
+    '<nav class="nav">\n'
+    '<button id="prev" aria-label="이전 쪽">‹</button>\n'
+    '<span id="pos"></span>\n'
+    '<button id="next" aria-label="다음 쪽">›</button>\n'
+    "</nav>\n"
+    f"<script>\n{SCRIPT}</script>"
+)
