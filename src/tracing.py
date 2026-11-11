@@ -23,6 +23,8 @@ LANGFUSE_VARS = [
     "LANGFUSE_SECRET_KEY",
     "LANGFUSE_BASE_URL",
     "LANGFUSE_TRACING_ENVIRONMENT",
+    # false 면 기록을 보내지 않는다. .env 에 적어도 먹게 함께 옮긴다 (#103)
+    "LANGFUSE_TRACING_ENABLED",
 ]
 
 NAMES_SHOWN = 5
@@ -44,10 +46,13 @@ def init() -> bool:
         except LLMError:
             pass  # 없으면 기록을 끈 채로 둔다
 
-    enabled = bool(os.environ.get("LANGFUSE_PUBLIC_KEY"))
+    has_key = bool(os.environ.get("LANGFUSE_PUBLIC_KEY"))
+    # SDK 와 같은 기준 — 값이 false 일 때만 끈다. 기준이 다르면 시작 로그와 실제 전송이 또 어긋난다
+    switch = os.environ.get("LANGFUSE_TRACING_ENABLED", "true")
+    enabled = has_key and switch.lower() != "false"
     if not enabled:
         # 키가 없으면 SDK 가 get_client() 를 부를 때마다 경고를 한 줄씩 남긴다.
-        # 꺼 둔 것이 의도이고, 평문 경고가 JSON 한 줄 로그를 깨므로 막는다
+        # 꺼 둔 것이 의도이고(키 없음 · false), 평문 경고가 JSON 한 줄 로그를 깨므로 막는다
         logging.getLogger("langfuse").setLevel(logging.ERROR)
     Langfuse(mask=mask)
     return enabled
