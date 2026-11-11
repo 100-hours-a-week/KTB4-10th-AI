@@ -23,9 +23,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
-from langfuse import get_client
+from langfuse import get_client, propagate_attributes
 
-from src import dates, logs, metrics
+from src import dates, logs, metrics, tracing
 from src.engine import graph, nodes
 from src.engine.nodes import FeedbackNotApplicable, InsufficientCandidates
 from src.llm import calllog
@@ -401,19 +401,29 @@ async def _generate(job: dict) -> Itinerary:
         "source_job_id": job.get("source_job_id"),
         "user_request": job["trip"].user_request,
     }
+    tags = tracing.trip_tags(job["trip"])
+
     # 작업 하나를 랭퓨즈 기록 하나로 묶는다. to_thread 는 지금 문맥을 복사해 넘기므로
-    # 스레드 안의 노드·모델 호출 기록이 이 아래로 들어온다
-    with get_client().start_as_current_observation(name=name, metadata=metadata):
-        if is_regeneration:
-            return await asyncio.to_thread(_regenerate, job, on_step)
-        return await asyncio.to_thread(
-            graph.run,
-            job["trip"],
-            places=job["places"],
-            events=job["events"],
-            on_step=on_step,
-            on_filtered=on_filtered,
-        )
+    # 스레드 안의 노드·모델 호출 기록이 이 아래로 들어온다.
+    # 태그는 바깥에서 감싼다 — 감싼 뒤에 생기는 단계에만 붙어서, 안에서 감싸면 맨 위 단계가 빠진다
+    with propagate_attributes(tags=tags):
+        with get_client().start_as_current_observation(
+            name=name, metadata=metadata
+        ) as root:
+            try:
+                if is_regeneration:
+                    return await asyncio.to_thread(_regenerate, job, on_step)
+                return await asyncio.to_thread(
+                    graph.run,
+                    job["trip"],
+                    places=job["places"],
+                    events=job["events"],
+                    on_step=on_step,
+                    on_filtered=on_filtered,
+                )
+            finally:
+                # 실패·시간 초과로 끊긴 작업도 그때까지 쓴 비용·토큰은 남긴다
+                tracing.score_usage(root)
 
 
 def _regenerate(job: dict, on_step) -> Itinerary:

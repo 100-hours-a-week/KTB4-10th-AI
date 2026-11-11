@@ -12,8 +12,10 @@ import os
 
 from langfuse import Langfuse
 
-from src.llm import llm_client
+from src import dates
+from src.llm import calllog, llm_client
 from src.llm.llm_client import LLMError
+from src.models import TripRequest
 
 # 스테이징·운영·로컬은 LANGFUSE_TRACING_ENVIRONMENT(staging · production · local)로 가른다
 LANGFUSE_VARS = [
@@ -81,3 +83,27 @@ def _names_by_day(itinerary: dict) -> dict[str, str]:
         names = [place["name"] for place in day["places"]]
         days[f"{day['day']}일차"] = " → ".join(names)
     return days
+
+
+def trip_tags(trip: TripRequest) -> list[str]:
+    """기록 목록의 Trace Tags 칸에서 며칠짜리 일정인지 바로 보려고 붙이는 태그."""
+    start = dates.parse_backend(trip.start_date)
+    end = dates.parse_backend(trip.end_date)
+    day_count = (end - start).days + 1
+    return [f"{day_count}일"]
+
+
+def score_usage(root) -> None:
+    """
+    바깥 단계(SPAN)의 Cost · Tokens 칸은 늘 비어 있다. 목록에서 일정 하나의 비용·토큰을
+    보려고 점수로 단다 — 바깥 단계에 직접 넣으면 상세 화면 합계가 두 번 더해진다.
+    """
+    cost = calllog.run_cost()
+    root.score_trace(name="cost_usd", value=cost["total"])
+    root.score_trace(name="input_cost_usd", value=cost["input"])
+    root.score_trace(name="output_cost_usd", value=cost["output"])
+
+    usage = calllog.run_usage()
+    root.score_trace(name="input_tokens", value=usage["input"])
+    root.score_trace(name="output_tokens", value=usage["output"])
+    root.score_trace(name="total_tokens", value=usage["total"])

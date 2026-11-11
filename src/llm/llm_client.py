@@ -126,7 +126,14 @@ def call_and_record(
             raise
 
         usage = response.usage
-        cost = calllog.claude_cost(model, usage.input_tokens, usage.output_tokens)
+        cost_parts = calllog.claude_cost_parts(
+            model, usage.input_tokens, usage.output_tokens
+        )
+        cost = None
+        if cost_parts is not None:
+            cost = cost_parts["total"]
+        calllog.add_run_cost(cost_parts)
+        calllog.add_run_usage(usage.input_tokens, usage.output_tokens)
         # 랭퓨즈에도 문자열로 넘긴다 — 객체는 SDK 가 dict 로 바꾼 뒤 mask 에 넘겨, 응답의
         # reasons 같은 칸이 노드 기록 규칙에 걸려 "N개" 로 줄어든다
         response_text = response.parsed_output.model_dump_json()
@@ -143,7 +150,7 @@ def call_and_record(
         generation.update(
             output=response_text,
             usage_details={"input": usage.input_tokens, "output": usage.output_tokens},
-            cost_details={"total": cost},
+            cost_details=cost_parts,
         )
 
     return response.parsed_output
