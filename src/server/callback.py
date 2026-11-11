@@ -33,6 +33,9 @@ PROGRESS_RETRY_DELAYS = (1,)
 MAX_RETRY_AFTER = 30
 # 서버를 끌 때 보내는 중인 알림을 기다리는 시간
 SHUTDOWN_WAIT = 10
+# 2xx 가 아닌 응답의 본문은 이 길이까지만 로그에 남긴다 — 이유를 읽기엔 앞부분이면 충분하고,
+# 앞단(프록시 등)이 HTML 오류 페이지를 통째로 돌려주면 로그 한 줄이 읽히지 않는다 (#101)
+MAX_BODY_CHARS = 500
 
 # 문구는 FE 와 정하면 바꾼다 (지금은 백엔드 예시 문구 기준)
 PROGRESS_MESSAGES = {
@@ -163,8 +166,8 @@ async def _send_with_retry(event: dict, delays: tuple[int, ...]) -> str:
     """delivered · rejected · gave_up 중 하나를 돌려준다."""
     max_attempts = len(delays) + 1
     for attempt in range(1, max_attempts + 1):
-        outcome, status, retry_after = await _post(event)
-        _log_attempt(event, attempt, outcome, status)
+        outcome, status, retry_after, body = await _post(event)
+        _log_attempt(event, attempt, outcome, status, body)
         if outcome != "retry":
             return outcome
         if attempt == max_attempts:
@@ -173,23 +176,27 @@ async def _send_with_retry(event: dict, delays: tuple[int, ...]) -> str:
         await asyncio.sleep(wait)
 
 
-async def _post(event: dict) -> tuple[str, int | None, float | None]:
-    """한 번 보낸다. (결과, HTTP 상태, 429 일 때 기다릴 초)."""
+async def _post(event: dict) -> tuple[str, int | None, float | None, str | None]:
+    """
+    한 번 보낸다. (결과, HTTP 상태, 429 일 때 기다릴 초, 응답 본문).
+    본문은 2xx 가 아닐 때만 돌려준다 — 백엔드가 왜 거절했는지가 거기 있다 (#101).
+    """
     try:
         response = await _client.post(CALLBACK_PATH, json=event)
     except httpx.TransportError:
         # 연결 실패·타임아웃 (TimeoutException 도 TransportError 의 한 갈래)
-        return "retry", None, None
+        return "retry", None, None, None
 
     status = response.status_code
     if 200 <= status < 300:
-        return "delivered", status, None
+        return "delivered", status, None, None
+    body = response.text[:MAX_BODY_CHARS]
     if status == 429:
-        return "retry", status, _retry_after(response)
+        return "retry", status, _retry_after(response), body
     if status >= 500:
-        return "retry", status, None
+        return "retry", status, None, body
     # 그 밖의 4xx — 다시 보내도 같은 답이다
-    return "rejected", status, None
+    return "rejected", status, None, body
 
 
 def _retry_after(response: httpx.Response) -> float | None:
@@ -200,7 +207,9 @@ def _retry_after(response: httpx.Response) -> float | None:
     return min(int(value), MAX_RETRY_AFTER)
 
 
-def _log_attempt(event: dict, attempt: int, outcome: str, status: int | None) -> None:
+def _log_attempt(
+    event: dict, attempt: int, outcome: str, status: int | None, body: str | None
+) -> None:
     # 401·403 은 토큰 설정이 틀렸다는 뜻이라 눈에 띄게
     if status in (401, 403):
         level = "ERROR"
@@ -211,16 +220,17 @@ def _log_attempt(event: dict, attempt: int, outcome: str, status: int | None) ->
     progress = event["data"]["progress"]
     # 최종 알림은 진행 단계가 없다. 어느 알림이 거절됐는지 로그만 보고 가리려고 남긴다
     step = progress["step"] if progress else None
-    logs.write(
-        level,
-        "callback_sent",
-        **_ids(event),
-        message=event["message"],
-        step=step,
-        attempt=attempt,
-        outcome=outcome,
-        http_status=status,
-    )
+    fields = {
+        "message": event["message"],
+        "step": step,
+        "attempt": attempt,
+        "outcome": outcome,
+        "http_status": status,
+    }
+    # 성공 · 연결 실패는 본문이 없다. 그때는 칸을 만들지 않아 성공 로그 모양을 그대로 둔다
+    if body is not None:
+        fields["response_body"] = body
+    logs.write(level, "callback_sent", **_ids(event), **fields)
 
 
 def _ids(event: dict) -> dict:
