@@ -211,6 +211,7 @@ def call_and_record(
         usage = response.usage
         input_tokens = usage.prompt_tokens if usage else None
         output_tokens = usage.completion_tokens if usage else None
+        calllog.add_run_usage(input_tokens, output_tokens)
         # llm_client.call_and_record 와 같은 이유로 랭퓨즈에도 문자열로 넘긴다
         response_text = parsed.model_dump_json()
         calllog.record(

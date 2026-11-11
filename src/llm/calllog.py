@@ -65,9 +65,12 @@ CLAUDE_PRICING = {
 HAIKU_5_5_TIER_INPUT = 100_000
 
 
-def claude_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
+def claude_cost_parts(
+    model: str, input_tokens: int, output_tokens: int
+) -> dict[str, float] | None:
     """
-    호출 한 건의 대략 비용. 요금표에 없는 모델이면 **None**.
+    호출 한 건의 대략 비용을 입력·출력·합계로. 요금표에 없는 모델이면 **None**.
+    키 이름은 랭퓨즈 cost_details 와 같다 — 그대로 넘긴다.
     Haiku 5.5 의 입력이 HAIKU_5_5_TIER_INPUT 을 넘어도 None (요금이 다른 구간).
 
     모르는 모델에 아무 요금이나 곱하지 않는 이유: 나중에 기록을 합산할 때
@@ -81,10 +84,13 @@ def claude_cost(model: str, input_tokens: int, output_tokens: int) -> float | No
         return None
 
     input_per_mtok, output_per_mtok = price
-    return (
-        input_tokens * input_per_mtok / 1_000_000
-        + output_tokens * output_per_mtok / 1_000_000
-    )
+    input_cost = input_tokens * input_per_mtok / 1_000_000
+    output_cost = output_tokens * output_per_mtok / 1_000_000
+    return {
+        "input": input_cost,
+        "output": output_cost,
+        "total": input_cost + output_cost,
+    }
 
 
 def _readable(response_text: str | None) -> object:
@@ -258,7 +264,57 @@ def start_run() -> None:
     안 부르면 call_files() 가 늘 빈 목록이다 — 기록 파일은 그대로 남고, 결과와
     잇는 이름표만 빠진다. 서버는 작업마다 부른다 (generations/ 기록에 이름을 적으려고).
     """
-    _CURRENT_RUN.set({"call_files": []})
+    _CURRENT_RUN.set({"call_files": [], "costs": [], "usages": []})
+
+
+def add_run_cost(cost_parts: dict[str, float] | None) -> None:
+    """
+    호출 한 건의 비용을 이 실행 흐름의 상자에 붙인다. 랭퓨즈에 일정 하나의 비용을 달려고.
+
+    숫자에 바로 더하지 않고 목록에 붙인다 — 판정은 여러 실에서 동시에 부르는데,
+    목록 붙이기는 동시에 해도 빠지지 않는다.
+    """
+    run = _CURRENT_RUN.get()
+    if run is None or cost_parts is None:
+        return
+    run["costs"].append(cost_parts)
+
+
+def run_cost() -> dict[str, float]:
+    """이 실행 흐름에서 나간 호출의 비용 합. 비용을 모르는 호출(vLLM 등)은 빠진다."""
+    total = {"input": 0.0, "output": 0.0, "total": 0.0}
+    run = _CURRENT_RUN.get()
+    if run is None:
+        return total
+    for cost_parts in run["costs"]:
+        for key in total:
+            total[key] += cost_parts[key]
+    return total
+
+
+def add_run_usage(input_tokens: int | None, output_tokens: int | None) -> None:
+    """
+    호출 한 건의 토큰을 이 실행 흐름의 상자에 붙인다. 랭퓨즈에 일정 하나의 토큰을 달려고.
+
+    비용과 따로 모은다 — vLLM 은 비용이 없어도 토큰은 있다.
+    """
+    run = _CURRENT_RUN.get()
+    if run is None or input_tokens is None or output_tokens is None:
+        return
+    run["usages"].append({"input": input_tokens, "output": output_tokens})
+
+
+def run_usage() -> dict[str, int]:
+    """이 실행 흐름에서 나간 호출의 토큰 합. 토큰을 모르는 호출은 빠진다."""
+    total = {"input": 0, "output": 0, "total": 0}
+    run = _CURRENT_RUN.get()
+    if run is None:
+        return total
+    for usage in run["usages"]:
+        total["input"] += usage["input"]
+        total["output"] += usage["output"]
+    total["total"] = total["input"] + total["output"]
+    return total
 
 
 def _remember(path: str) -> None:
